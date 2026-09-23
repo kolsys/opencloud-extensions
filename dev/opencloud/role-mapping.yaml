@@ -1,0 +1,26 @@
+# Roles of the users, appended to opencloud/proxy.yaml by the route generator:
+# the proxy reads this mapping from a file only, never from the environment.
+# It takes effect once PROXY_ROLE_ASSIGNMENT_DRIVER is oidc.
+#
+# The claim values below are the ones the builtin provider of the platform
+# emits. With an external provider, put its own values here and point
+# PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM at the claim that carries them. The first
+# match wins, so the highest privilege comes first, and a user whose claim
+# matches nothing is refused.
+role_assignment:
+  oidc_role_mapper:
+    role_claim: roles
+    role_mapping:
+      - role_name: admin
+        claim_value: opencloudAdmin
+      - role_name: spaceadmin
+        claim_value: opencloudSpaceAdmin
+      - role_name: user
+        claim_value: opencloudUser
+      - role_name: user-light
+        claim_value: opencloudGuest
+
+# Quota of the personal space per role, in bytes, keyed by the id of the role
+# bundle. Project spaces are not affected: their quota is set on the space.
+# role_quotas:
+#   38071a68-456a-4553-846a-fa67bf5596cc: 1073741824

@@ -1,0 +1,11 @@
+*
+!common
+!file-activity
+!video-thumbnails
+
+**/testdata
+**/*_test.go
+
+# The web app is built inside the image; a local build must not leak in.
+**/node_modules
+video-thumbnails/internal/web/dist

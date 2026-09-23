@@ -1,0 +1,29 @@
+# Working documents of the development stage, not part of the repository.
+/SPEC.md
+/docs/
+
+# Build output
+/bin/
+
+# Stand
+/dev/.env
+/dev/oidc.env
+/dev/opencloud/theme/
+/dev/testdata/
+
+# Go
+*.test
+*.out
+go.work.sum
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# The web app of video-thumbnails: dependencies, what the bundler leaves
+# behind, and the build the binary embeds.
+/video-thumbnails/web-app/node_modules/
+/video-thumbnails/web-app/.__mf__temp/
+/video-thumbnails/internal/web/dist/*
+!/video-thumbnails/internal/web/dist/.gitkeep

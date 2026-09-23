@@ -1,0 +1,19 @@
+# Added to the default policy of the proxy, which allows the page nothing but
+# the instance itself: PROXY_CSP_CONFIG_FILE_LOCATION merges the lists, the
+# override variable would replace them.
+#
+# Put the identity provider here when the platform runs on an external one.
+# The web talks to it from the page: discovery and token over fetch, and the
+# renewal of the token in a hidden frame. Without this the login stops at
+# "blocked the loading of a resource (connect-src)". default-src covers what
+# the other directives do not, and the hop from oidc-callback.html into the
+# application lands there.
+directives:
+  default-src:
+    - "'self'"
+  connect-src:
+    - 'https://idp.example.com/'
+  frame-src:
+    - 'https://idp.example.com/'
+  script-src:
+    - 'https://idp.example.com/'

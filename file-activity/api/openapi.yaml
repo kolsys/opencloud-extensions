@@ -1,0 +1,332 @@
+openapi: 3.1.0
+
+info:
+  title: file-activity
+  version: "0.1.0"
+  summary: Pull feed of file changes in OpenCloud.
+  description: |
+    The service turns the file events of OpenCloud into a feed with a cursor.
+    A client reads the feed from where it left off and advances its cursor by
+    the `next` of every answer.
+
+    The cursor is the sequence number of an entry. Sequence numbers are
+    assigned in order and never reused, but they are not contiguous across
+    restarts of the platform, so a client compares them and never computes
+    with them.
+
+    Entries are dropped once they are older than the retention of the feed.
+    A cursor that points before the oldest entry is answered with `410`, and
+    the client has to resync its own state from scratch: continuing from the
+    oldest available entry would silently skip the changes in between.
+
+    Requests reach the service through the proxy of the platform, which
+    authenticates them. Any user of the platform may read the feed unless the
+    service was started with a list of allowed user names.
+
+servers:
+  - url: https://localhost:9200
+    description: Stand
+
+security:
+  - appToken: []
+
+tags:
+  - name: feed
+    description: Reading the feed.
+
+paths:
+  /api/file-activity:
+    get:
+      tags: [feed]
+      operationId: readFeed
+      summary: Read the entries after a cursor.
+      description: |
+        Returns the entries with a sequence number greater than `since`, oldest
+        first. An empty `events` with `next` equal to `since` means the client
+        has caught up; the same `since` always returns the same entries.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Cursor to read after. Zero, or absent, starts at the oldest entry the feed still holds.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+          example: 42
+        - name: limit
+          in: query
+          required: false
+          description: Largest number of entries to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          example: 100
+      responses:
+        "200":
+          description: A page of the feed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Page"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "410":
+          description: |
+            The cursor is older than the oldest entry the feed holds. The
+            client has to resync its state and continue from `last`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Head"
+        "502":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/file-activity/head:
+    get:
+      tags: [feed]
+      operationId: readHead
+      summary: Report the bounds of the feed.
+      description: |
+        Tells which part of the feed is readable. A client compares its cursor
+        against `first_available` to find out whether it fell behind, and
+        against `last` to find out whether there is anything to read.
+      responses:
+        "200":
+          description: The bounds of the feed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Head"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    appToken:
+      type: http
+      scheme: basic
+      description: |
+        The user name of the platform and an app token as the password. A
+        token is issued by the platform at `POST /auth-app/tokens?expiry=72h`.
+
+  responses:
+    BadRequest:
+      description: A query parameter is out of range or not a number.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The proxy of the platform rejected the credentials.
+    Forbidden:
+      description: The user is not on the list of users allowed to read the feed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: The feed itself could not be read.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Page:
+      type: object
+      additionalProperties: false
+      required: [events, next, first_available, last]
+      properties:
+        events:
+          type: array
+          description: The entries after the cursor, oldest first.
+          items:
+            $ref: "#/components/schemas/Event"
+        next:
+          type: integer
+          format: int64
+          description: Cursor for the next request. Equal to the `since` of the request when nothing was returned.
+          example: 44
+        first_available:
+          type: integer
+          format: int64
+          description: Oldest sequence number the feed still holds. Zero while the feed is empty.
+          example: 4
+        last:
+          type: integer
+          format: int64
+          description: Newest sequence number of the feed. Zero while the feed is empty.
+          example: 50
+
+    Head:
+      type: object
+      additionalProperties: false
+      required: [first_available, last]
+      properties:
+        first_available:
+          type: integer
+          format: int64
+          example: 4
+        last:
+          type: integer
+          format: int64
+          example: 50
+
+    Event:
+      type: object
+      additionalProperties: false
+      required: [seq, id, ts, type, space_id, path, old_path, is_dir]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: Sequence number of the entry, and the cursor that reads past it.
+          example: 4
+        id:
+          type: string
+          description: |
+            Identifier of the event of the platform the entry was made from.
+            An entry is published under it once, so a client may use it to
+            recognise a repeat. An operation on a folder yields one entry for
+            the folder and one per file under it; the entries of the files
+            carry the identifier of the event followed by a slash and the
+            identifier of the file.
+          example: eff22ab5-cd79-4322-919b-748cb255f3e6
+        ts:
+          type: string
+          format: date-time
+          description: When the platform recorded the change.
+          example: "2026-09-18T17:37:02.929091179Z"
+        type:
+          $ref: "#/components/schemas/EventType"
+        space_id:
+          type: string
+          description: Space the change happened in.
+          example: b1f74ec4-dd7e-11ef-a543-03775734d0f7
+        space_name:
+          type: string
+          description: Name of the space. Present on the space entries.
+          example: Fixtures renamed
+        file_id:
+          type: string
+          description: |
+            Identifier of the file or folder, stable across renames and moves.
+            Absent on the space entries.
+          example: 0eff3675-e235-45d1-98ed-b4200781fd6c
+        resource_id:
+          type: string
+          description: The same resource as the platform addresses it in its own APIs.
+          example: 904763f4-a03c-43c3-aa48-c1e2ee6e645d$b1f74ec4-dd7e-11ef-a543-03775734d0f7!0eff3675-e235-45d1-98ed-b4200781fd6c
+        path:
+          type: [string, "null"]
+          description: |
+            Path inside the space, leading slash included. For `trashed` and
+            `purged` it is the last path the resource had; null when that is
+            unknown, which happens for a resource the service never saw.
+          example: /feed-test/b.mp4
+        old_path:
+          type: [string, "null"]
+          description: Path before the change. Set on `moved`, null otherwise.
+          example: /feed-test/a.mp4
+        is_dir:
+          type: boolean
+          description: Whether the entry is about a folder or a space rather than a file.
+          example: false
+        size:
+          type: integer
+          format: int64
+          description: Size of the file in bytes, when the platform still reported one.
+          example: 2000000
+        mime:
+          type: string
+          description: Media type the platform reports for the file.
+          example: video/mp4
+        etag:
+          type: string
+          description: Version of the file, without the quotes the platform wraps it in.
+          example: 8b60b33ffc2081666f0fb681619a618e
+        blob_id:
+          type: string
+          description: |
+            Identifier of the blob that holds the bytes of the file in the
+            bucket of the platform. Present on every entry about a file the
+            service saw uploaded; absent on folders, on spaces, and on files
+            whose upload predates the service.
+
+            The key of the blob in the bucket is derived from it and the
+            space, the way the decomposeds3 driver of the platform lays blobs
+            out: the space id, then the first four pairs of characters of the
+            blob id as directories, then the rest:
+            `{space_id}/{b[0:2]}/{b[2:4]}/{b[4:6]}/{b[6:8]}/{b[8:]}`.
+            A blob id of `ac09e55e-8c8c-4fa7-9b51-258afaf88d44` in space
+            `b1f74ec4-dd7e-11ef-a543-03775734d0f7` is the object
+            `b1f74ec4-dd7e-11ef-a543-03775734d0f7/ac/09/e5/5e/-8c8c-4fa7-9b51-258afaf88d44`.
+            The bucket is the one the platform is configured with.
+          example: ac09e55e-8c8c-4fa7-9b51-258afaf88d44
+        checksum:
+          type: string
+          description: |
+            Checksum of the bytes as the platform computed it at upload, the
+            algorithm as a prefix. Only `sha1` is sent.
+          example: sha1:2fd4e1c67a2d28fced849ee1bb76e7391b93eb12
+        mtime:
+          type: string
+          format: date-time
+          description: Modification time of the file as the platform reports it.
+          example: "2026-09-21T09:16:17.51Z"
+        actor:
+          $ref: "#/components/schemas/Actor"
+
+    EventType:
+      type: string
+      description: |
+        What happened. A new version of a file and a restored older version
+        are both `file_updated`; an upload that never finished produces no
+        entry at all.
+      enum:
+        - file_created
+        - file_updated
+        - folder_created
+        - trashed
+        - restored
+        - purged
+        - moved
+        - space_created
+        - space_deleted
+        - space_renamed
+      example: moved
+
+    Actor:
+      type: object
+      additionalProperties: false
+      required: [id]
+      description: Who caused the change. Absent when the platform named nobody.
+      properties:
+        id:
+          type: string
+          example: b1f74ec4-dd7e-11ef-a543-03775734d0f7
+        name:
+          type: string
+          description: User name, present when the platform sent it with the event.
+          example: alan
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: limit must be between 1 and 1000

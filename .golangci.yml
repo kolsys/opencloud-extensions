@@ -1,0 +1,91 @@
+version: "2"
+
+run:
+  modules-download-mode: readonly
+
+linters:
+  default: all
+  disable:
+    - contextcheck
+    - lll
+    - exhaustruct
+    - exhaustive
+    - wrapcheck
+    - wsl
+    - varnamelen
+    - tagliatelle
+    - godox
+    - forbidigo
+    - gochecknoglobals
+    - nlreturn
+    - godot
+    - funlen
+    - ireturn
+    - err113
+    - containedctx
+    - paralleltest
+    - gocritic
+    - whitespace
+    - cyclop
+    - noctx
+    - testpackage
+    - forcetypeassert
+    - nonamedreturns
+    - dupl
+    - errorlint
+    - unparam
+    - gocognit
+    - nestif
+    - depguard
+    # Linters of golangci-lint v2 the list of the platform predates.
+    - wsl_v5 # the wsl of v1, disabled there under the old name
+    - noinlineerr # "if err := f(); err != nil" is the style of the platform
+    - recvcheck # a TextUnmarshaler with a Stringer cannot avoid mixing receivers
+  settings:
+    tagalign:
+      align: false
+      sort: true
+      order:
+        - json
+        - yaml
+        - mapstructure
+        - env
+        - desc
+    gocyclo:
+      min-complexity: 35
+    interfacebloat:
+      max: 15
+    gomoddirectives:
+      # The services are bound to the common module by a relative replace.
+      replace-local: true
+  exclusions:
+    generated: lax
+    # The "comments" preset is left out on purpose: comments on exported
+    # entities are mandatory.
+    presets:
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: _test.go
+        linters:
+          - errcheck
+          - gosec
+          - maintidx
+      # A table of default values is literals by definition.
+      - path: internal/config/config\.go
+        linters:
+          - mnd
+      # The subpackages of a service are named like the ones of the platform:
+      # config, command, metrics, errors, api.
+      - linters:
+          - revive
+        text: "var-naming: avoid (meaningless )?package names"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+severity:
+  default: error

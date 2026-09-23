@@ -1,0 +1,205 @@
+name: opencloud-extensions
+
+services:
+  opencloud:
+    image: ${OC_DOCKER_IMAGE:-opencloudeu/opencloud}:${OC_DOCKER_TAG:?pin the version of the platform}
+    entrypoint: ["/bin/sh", "-c"]
+    # init fails once the configuration file exists, which is the normal case
+    # on every run but the first one.
+    command: ["opencloud init || true; exec opencloud server"]
+    environment:
+      OC_URL: ${OC_URL:-https://localhost:9200}
+      OC_LOG_LEVEL: ${OC_LOG_LEVEL:-info}
+      OC_LOG_PRETTY: "false"
+      OC_INSECURE: "true"
+      PROXY_TLS: "true"
+
+      # First pass runs on the demo users of idm: alan, mary, margaret, dennis
+      # and lynn, password demo. Keycloak is wired in the second pass.
+      IDM_CREATE_DEMO_USERS: "true"
+      IDM_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+
+      # App tokens for the WebDAV clients and for the API of the extensions.
+      WEB_OPTION_DISABLE_SPONSOR_LINK: "true"
+      WEB_OPTION_DISABLE_FEEDBACK_LINK: "true"
+
+      OC_ADD_RUN_SERVICES: auth-app
+      PROXY_ENABLE_APP_AUTH: "true"
+
+      # Blobs in S3, metadata stays on the local disk of the container.
+      STORAGE_USERS_DRIVER: decomposeds3
+      STORAGE_SYSTEM_DRIVER: decomposed
+      STORAGE_USERS_DECOMPOSEDS3_ENDPOINT: http://minio:9000
+      STORAGE_USERS_DECOMPOSEDS3_REGION: ${S3_REGION:-default}
+      STORAGE_USERS_DECOMPOSEDS3_BUCKET: ${S3_BLOBS_BUCKET:-opencloud-blobs}
+      STORAGE_USERS_DECOMPOSEDS3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      STORAGE_USERS_DECOMPOSEDS3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      # Needed by the backfill of video-thumbnails.
+      OCDAV_ALLOW_PROPFIND_DEPTH_INFINITY: "true"
+
+      # One copy of a file, no versions: they would double what S3 holds.
+      OC_DISABLE_VERSIONING: "true"
+      # A new project space starts with 200 GB, the administrator raises it on
+      # the space. The personal quota per role is in opencloud/proxy.yaml.
+      GRAPH_SPACES_DEFAULT_QUOTA: "214748364800"
+      # The trash keeps a week; purging it is a command, see the README.
+      STORAGE_USERS_PURGE_TRASH_BIN_PERSONAL_DELETE_BEFORE: 168h
+      STORAGE_USERS_PURGE_TRASH_BIN_PROJECT_DELETE_BEFORE: 168h
+      # A folder downloads as a zip of at most 2 GB.
+      FRONTEND_ARCHIVER_MAX_SIZE: "2147483648"
+      # No calendar and no address book: the web hides both once the
+      # capability is off.
+      FRONTEND_DISABLE_RADICALE: "true"
+
+      # The service account the extensions authenticate with.
+      OC_SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID:-opencloud-extensions}
+      OC_SERVICE_ACCOUNT_SECRET: ${SERVICE_ACCOUNT_SECRET:?set SERVICE_ACCOUNT_SECRET}
+
+      # Open the internal ports to the docker network. They must not be
+      # published to the host: the proxy does not strip an incoming
+      # x-access-token.
+      NATS_NATS_HOST: 0.0.0.0
+      NATS_NATS_PORT: "9233"
+      MICRO_REGISTRY_ADDRESS: 127.0.0.1:9233
+      GATEWAY_GRPC_ADDR: 0.0.0.0:9142
+      WEBDAV_HTTP_ADDR: 0.0.0.0:9115
+      STORAGE_USERS_HTTP_ADDR: 0.0.0.0:9158
+      STORAGE_USERS_DATA_SERVER_URL: http://opencloud:9158/data
+    # The environment above wins over both files, so it carries nothing they
+    # set. The second file switches the platform to Keycloak and is optional,
+    # see oidc.env.example; of two files the later one wins.
+    env_file:
+      - path: ./stand.env
+      - path: ./oidc.env
+        required: false
+    volumes:
+      - opencloud-config:/etc/opencloud
+      - opencloud-data:/var/lib/opencloud
+      - ./opencloud/proxy.yaml:/etc/opencloud/proxy.yaml:ro
+      - ./opencloud/web.yaml:/etc/opencloud/web.yaml:ro
+      - ./opencloud/csp.yaml:/etc/opencloud/csp.yaml:ro
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "-o", "/dev/null", "https://127.0.0.1:9200/status.php"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    networks: [opencloud-net]
+    restart: unless-stopped
+
+  minio:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio}:${MINIO_TAG:-latest}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    volumes:
+      - minio-data:/data
+    ports:
+      # Console, reachable from the host only.
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [opencloud-net]
+    restart: unless-stopped
+
+  minio-init:
+    image: ${MC_IMAGE:-quay.io/minio/mc}:${MC_TAG:-latest}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set stand http://minio:9000 "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" &&
+        mc mb --ignore-existing stand/"$$S3_BLOBS_BUCKET" &&
+        mc mb --ignore-existing stand/"$$S3_THUMBS_BUCKET" &&
+        mc mb --ignore-existing stand/"$$S3_TREE_BUCKET"
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      S3_BLOBS_BUCKET: ${S3_BLOBS_BUCKET:-opencloud-blobs}
+      S3_THUMBS_BUCKET: ${S3_THUMBS_BUCKET:-video-thumbnails}
+      S3_TREE_BUCKET: ${S3_TREE_BUCKET:-file-activity-tree}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks: [opencloud-net]
+
+  video-thumbnails:
+    build:
+      context: ..
+      dockerfile: video-thumbnails/Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    environment:
+      OC_EVENTS_ENDPOINT: opencloud:9233
+      OC_EVENTS_CLUSTER: opencloud-cluster
+      OC_GATEWAY_GRPC_ADDR: opencloud:9142
+      OC_SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID:-opencloud-extensions}
+      OC_SERVICE_ACCOUNT_SECRET: ${SERVICE_ACCOUNT_SECRET:?set SERVICE_ACCOUNT_SECRET}
+      OC_INSECURE: "true"
+      OC_LOG_LEVEL: ${EXTENSIONS_LOG_LEVEL:-debug}
+      PLATFORM_INTERNAL_URL: https://opencloud:9200
+      PLATFORM_WEBDAV_UPSTREAM: http://opencloud:9115
+      VIDEO_THUMBNAILS_HTTP_ADDR: 0.0.0.0:9200
+      VIDEO_THUMBNAILS_S3_ENDPOINT: http://minio:9000
+      VIDEO_THUMBNAILS_S3_REGION: ${S3_REGION:-default}
+      VIDEO_THUMBNAILS_S3_BUCKET: ${S3_THUMBS_BUCKET:-video-thumbnails}
+      VIDEO_THUMBNAILS_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      VIDEO_THUMBNAILS_S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      VIDEO_THUMBNAILS_WORKERS: ${VIDEO_THUMBNAILS_WORKERS:-2}
+    volumes:
+      - video-thumbnails-cache:/var/cache/video-thumbnails
+    depends_on:
+      opencloud:
+        condition: service_healthy
+    networks: [opencloud-net]
+    restart: unless-stopped
+
+  file-activity:
+    build:
+      context: ..
+      dockerfile: file-activity/Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    environment:
+      OC_EVENTS_ENDPOINT: opencloud:9233
+      OC_EVENTS_CLUSTER: opencloud-cluster
+      OC_GATEWAY_GRPC_ADDR: opencloud:9142
+      OC_SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID:-opencloud-extensions}
+      OC_SERVICE_ACCOUNT_SECRET: ${SERVICE_ACCOUNT_SECRET:?set SERVICE_ACCOUNT_SECRET}
+      OC_INSECURE: "true"
+      OC_LOG_LEVEL: ${EXTENSIONS_LOG_LEVEL:-debug}
+      PLATFORM_INTERNAL_URL: https://opencloud:9200
+      FILE_ACTIVITY_HTTP_ADDR: 0.0.0.0:9201
+      # The copy of the tree for restore; leave the endpoint empty to run
+      # without one.
+      FILE_ACTIVITY_TREE_S3_ENDPOINT: http://minio:9000
+      FILE_ACTIVITY_TREE_S3_REGION: ${S3_REGION:-default}
+      FILE_ACTIVITY_TREE_S3_BUCKET: ${S3_TREE_BUCKET:-file-activity-tree}
+      FILE_ACTIVITY_TREE_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      FILE_ACTIVITY_TREE_S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      FILE_ACTIVITY_MAX_AGE: ${FILE_ACTIVITY_MAX_AGE:-2160h}
+      FILE_ACTIVITY_ALLOWED_USERS: ${FILE_ACTIVITY_ALLOWED_USERS:-}
+      FILE_ACTIVITY_WEBHOOK_URL: ${FILE_ACTIVITY_WEBHOOK_URL:-}
+      FILE_ACTIVITY_WEBHOOK_SECRET: ${FILE_ACTIVITY_WEBHOOK_SECRET:-}
+    depends_on:
+      opencloud:
+        condition: service_healthy
+    networks: [opencloud-net]
+    restart: unless-stopped
+
+volumes:
+  opencloud-config:
+  opencloud-data:
+  minio-data:
+  video-thumbnails-cache:
+
+networks:
+  opencloud-net:

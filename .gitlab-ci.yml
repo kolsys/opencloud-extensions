@@ -1,0 +1,77 @@
+variables:
+  GO_IMAGE: "golang:1.26"
+  GOLANGCI_IMAGE: "golangci/golangci-lint:v2.10.1"
+  PLATFORMS: "linux/amd64,linux/arm64"
+
+stages:
+  - test
+  - build
+
+# The modules are handled one by one: the repository is a workspace of three
+# and the root itself is not a module.
+test:
+  image: $GO_IMAGE
+  stage: test
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.go
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths:
+      - .go/pkg/mod
+  script:
+    - for m in common video-thumbnails file-activity; do (cd "$m" && go test ./...) || exit 1; done
+
+lint:
+  image: $GOLANGCI_IMAGE
+  stage: test
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.go
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths:
+      - .go/pkg/mod
+  script:
+    - for m in common video-thumbnails file-activity; do (cd "$m" && golangci-lint run ./...) || exit 1; done
+
+lint-api:
+  image: node:22-alpine
+  stage: test
+  script:
+    - for s in */api/openapi.yaml; do npx --yes @redocly/cli@latest lint "$s" || exit 1; done
+
+# The web app of video-thumbnails; the image builds it again on its own.
+web:
+  image: node:22-alpine
+  stage: test
+  cache:
+    key: npm-$CI_COMMIT_REF_SLUG
+    paths:
+      - .npm
+  script:
+    - cd video-thumbnails/web-app && npm ci --cache ../../.npm && npm run check && npm run build
+
+# One manifest per extension covering amd64 and arm64. The go and node stages
+# run on the machine of the runner and cross compile, so no emulation is
+# needed for them; only the final alpine layer comes from the target platform.
+docker-build:
+  image: docker:latest
+  stage: build
+  services:
+    - docker:dind
+  parallel:
+    matrix:
+      - EXTENSION: [video-thumbnails, file-activity]
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker buildx create --use --name ci
+  script:
+    # The build context is the root of the repository: every extension is
+    # built together with the common module.
+    - docker buildx build --pull --platform "$PLATFORMS"
+      -f "${EXTENSION}/Dockerfile"
+      --build-arg "VERSION=${CI_COMMIT_TAG}"
+      -t "${CI_REGISTRY_IMAGE}/${EXTENSION}:${CI_COMMIT_TAG}"
+      --push
+      .
+  rules:
+    - if: $CI_COMMIT_TAG

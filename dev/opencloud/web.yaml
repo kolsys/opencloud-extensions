@@ -1,0 +1,8 @@
+# Web apps of the extensions. The web of the platform loads an external app
+# by URL, here the one video-thumbnails serves out of its binary, so nothing
+# has to reach the disk of the platform.
+web:
+  config:
+    external_apps:
+      - id: video-thumbnails
+        path: /api/video-thumbnails/web/js/remoteEntry.mjs
