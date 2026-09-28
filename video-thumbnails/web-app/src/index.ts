@@ -1,5 +1,13 @@
-import { defineWebApplication, usePreviewService, ProcessorType } from '@opencloud-eu/web-pkg'
-import type { LoadPreviewOptions } from '@opencloud-eu/web-pkg'
+import {
+  defineWebApplication,
+  usePreviewService,
+  useAppsStore,
+  useRouter,
+  ProcessorType
+} from '@opencloud-eu/web-pkg'
+import type { ApplicationSetupOptions, LoadPreviewOptions } from '@opencloud-eu/web-pkg'
+
+import { closeToFolder } from './closeToFolder'
 
 /**
  * The web asks for a preview only when the PROPFIND says the file has one,
@@ -40,10 +48,15 @@ const withPreview = (options: LoadPreviewOptions): LoadPreviewOptions => {
 }
 
 export default defineWebApplication({
-  setup() {
+  setup({ applicationConfig }: ApplicationSetupOptions) {
     const previewService = usePreviewService()
     const loadPreview = previewService.loadPreview.bind(previewService)
     previewService.loadPreview = (options, ...rest) => loadPreview(withPreview(options), ...rest)
+
+    // off unless the config of the app says `closeToFolder: true`
+    if (applicationConfig?.closeToFolder === true) {
+      closeToFolder(useRouter(), useAppsStore())
+    }
 
     return {
       appInfo: {

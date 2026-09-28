@@ -6,3 +6,6 @@ web:
     external_apps:
       - id: video-thumbnails
         path: /api/video-thumbnails/web/js/remoteEntry.mjs
+        config:
+          # a file opened by a plain link closes into its folder
+          closeToFolder: true
