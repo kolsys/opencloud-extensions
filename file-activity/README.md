@@ -15,10 +15,21 @@ GET /api/file-activity/head
 ```
 
 An answer carries the entries and a `next`; the client stores `next` and passes
-it as `since` the following time. Entries older than the retention are dropped,
-and a cursor that points before the oldest one is answered with `410`: the
-client has to resync its own state, because continuing from the oldest entry
-would silently skip what is missing between.
+it as `since` the following time, and an empty page means it has caught up.
+Entries older than the retention are dropped, and a cursor that points before
+the oldest one is answered with `410`: the client has to resync its own state,
+because continuing from the oldest entry would silently skip what is missing
+between.
+
+A user reads the spaces it is a member of — its personal space and the project
+spaces, as `/graph/v1.0/me/drives` of the platform lists them — and the answer
+names them in `spaces`. Shares the user received are not followed. Every entry
+is published to `file-activity.events.<space>`, so the server of the stream
+does the filtering, and once nothing more of those spaces follows `next` jumps
+to the head of the feed: a client of quiet spaces keeps its cursor inside the
+retention. Membership is the one of the moment of the request, cached for a
+minute: a space joined later shows from then on, a space left drops out of
+`spaces`. The users in `FILE_ACTIVITY_FULL_FEED_USERS` read every space.
 
 An entry has the type of the change, the path, the space, the id of the file,
 its size, mime, mtime, checksums and the blob key. A folder that is deleted or
@@ -31,8 +42,9 @@ way. Set `FILE_ACTIVITY_ALLOWED_USERS` to limit who may read.
 
 Changes can also be pushed: with `FILE_ACTIVITY_WEBHOOK_URL` every batch is
 posted to that endpoint, signed with HMAC-SHA256 over the body in
-`X-File-Activity-Signature` when a secret is set. The feed stays the source of truth — the
-push is a hint that something happened.
+`X-File-Activity-Signature` when a secret is set. The push carries every
+space. The feed stays the source of truth — the push is a hint that something
+happened.
 
 ## The tree in S3
 
@@ -103,8 +115,9 @@ Everything is environment. The platform block is shared by both extensions.
 | `OC_LOG_LEVEL`, `FILE_ACTIVITY_LOG_LEVEL` | `info` | Log level. |
 | `FILE_ACTIVITY_HTTP_ADDR` | `0.0.0.0:9201` | Address the HTTP server listens on. |
 | `FILE_ACTIVITY_ALLOWED_USERS` | empty | User names allowed to read the feed. Empty means everyone. |
+| `FILE_ACTIVITY_FULL_FEED_USERS` | empty | User names that read every space. Everyone else reads the spaces they are a member of. |
 | `FILE_ACTIVITY_STREAM` | `file-activity` | Name of the stream of the feed. |
-| `FILE_ACTIVITY_SUBJECT` | `file-activity.events` | Subject the feed is published to. |
+| `FILE_ACTIVITY_SUBJECT` | `file-activity.events` | Prefix of the subjects of the feed; the space is the last token. |
 | `FILE_ACTIVITY_MAX_AGE` | `2160h` | How long an entry stays readable. |
 | `FILE_ACTIVITY_MAX_BYTES` | `10Gi` | Size limit of the stream. |
 | `FILE_ACTIVITY_TREE_S3_ENDPOINT` | empty | URL of the S3 endpoint. Empty disables the tree. |

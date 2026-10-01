@@ -74,22 +74,27 @@ func (c *Conn) Publish(ctx context.Context, subject, id string, data []byte) (Ac
 type Message struct {
 	Seq  uint64
 	Data []byte
+	// Pending is how many messages matching the read were stored after this
+	// one when it was delivered; zero means the read has drained the stream.
+	Pending uint64
 }
 
 // ReadFrom returns up to limit messages of the stream starting at sequence
-// seq, without waiting for messages that are not there yet. An empty result
+// seq, without waiting for messages that are not there yet. With subjects
+// only the messages on them are returned, in stream order. An empty result
 // means the reader has caught up.
 //
 // It reads through an ordered consumer, which the server cleans up on its
 // own once it goes idle.
-func (c *Conn) ReadFrom(ctx context.Context, stream string, seq uint64, limit int) ([]Message, error) {
+func (c *Conn) ReadFrom(ctx context.Context, stream string, seq uint64, limit int, subjects ...string) ([]Message, error) {
 	if limit < 1 {
 		return nil, nil
 	}
 
 	consumer, err := c.js.OrderedConsumer(ctx, stream, jetstream.OrderedConsumerConfig{
-		DeliverPolicy: jetstream.DeliverByStartSequencePolicy,
-		OptStartSeq:   seq,
+		DeliverPolicy:  jetstream.DeliverByStartSequencePolicy,
+		OptStartSeq:    seq,
+		FilterSubjects: subjects,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("jsx: read %s from %d: %w", stream, seq, err)
@@ -106,7 +111,7 @@ func (c *Conn) ReadFrom(ctx context.Context, stream string, seq uint64, limit in
 		if err != nil {
 			return nil, fmt.Errorf("jsx: read %s from %d: metadata: %w", stream, seq, err)
 		}
-		messages = append(messages, Message{Seq: metadata.Sequence.Stream, Data: message.Data()})
+		messages = append(messages, Message{Seq: metadata.Sequence.Stream, Data: message.Data(), Pending: metadata.NumPending})
 	}
 	if err := batch.Error(); err != nil {
 		return nil, fmt.Errorf("jsx: read %s from %d: %w", stream, seq, err)

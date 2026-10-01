@@ -125,7 +125,7 @@ func runServe(ctx context.Context, version string, args []string) error {
 
 	mux := http.NewServeMux()
 	obs.Mount(mux, registry, health)
-	api.New(store, platform, cfg.AllowedUsers, m, log).Register(mux)
+	api.New(store, platform, api.Access{Allowed: cfg.AllowedUsers, FullFeed: cfg.FullFeedUsers}, m, log).Register(mux)
 
 	tasks := []func(context.Context) error{
 		ingest.New(conn, store, ingest.NewMapper(gateway, kept, log), m, config.Name, log).Run,

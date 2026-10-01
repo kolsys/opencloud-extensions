@@ -64,10 +64,19 @@ type Head struct {
 	Last           uint64 `json:"last"`
 }
 
-// Page is the answer to a read.
+// Page is the answer to a read. Spaces are the ones the page covers, nil for
+// a reader of the whole feed.
 type Page struct {
 	Events         []Event `json:"events"`
 	Next           uint64  `json:"next"`
 	FirstAvailable uint64  `json:"first_available"`
 	Last           uint64  `json:"last"`
+	Spaces         []Space `json:"spaces,omitzero"`
+}
+
+// Space is a space the reader of a page is a member of.
+type Space struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
 }

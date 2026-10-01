@@ -88,7 +88,7 @@ func properties(t *testing.T, spec openAPI, schema string) []string {
 // Every path and method the description promises has to be served.
 func TestDescribedRoutesAreServed(t *testing.T) {
 	spec := load(t)
-	mux := newHandler(t, &fakeFeed{firstAvailable: 1, last: 1}, nil, nil)
+	mux := newHandler(t, &fakeFeed{firstAvailable: 1, last: 1}, nil, Access{})
 
 	described := 0
 	for path, methods := range spec.Paths {
@@ -133,7 +133,8 @@ func TestDescribedFieldsMatchTheStructs(t *testing.T) {
 	}{
 		{"Event", full},
 		{"Actor", feed.Actor{ID: "user", Name: "alan"}},
-		{"Page", feed.Page{Events: []feed.Event{}}},
+		{"Page", feed.Page{Events: []feed.Event{}, Spaces: []feed.Space{{ID: "space", Name: "Space", Type: "project"}}}},
+		{"Space", feed.Space{ID: "space", Name: "Space", Type: "project"}},
 		{"Head", feed.Head{}},
 	} {
 		if got, want := keys(t, tc.value), properties(t, spec, tc.schema); !slices.Equal(got, want) {
@@ -155,6 +156,9 @@ func TestRequiredFieldsAreTheOnesAlwaysSent(t *testing.T) {
 	}
 	if got, want := keys(t, feed.Head{}), spec.Components.Schemas["Head"].Required; !slices.Equal(got, sorted(want)) {
 		t.Errorf("Head: %v against %v", got, want)
+	}
+	if got, want := keys(t, feed.Space{}), spec.Components.Schemas["Space"].Required; !slices.Equal(got, sorted(want)) {
+		t.Errorf("Space: %v against %v", got, want)
 	}
 }
 
@@ -188,7 +192,7 @@ func TestDescribedStatusCodes(t *testing.T) {
 		t.Fatalf("parse the description: %v", err)
 	}
 
-	mux := newHandler(t, &fakeFeed{firstAvailable: 100, last: 200}, &fakeIdentifier{users: map[string]string{}}, []string{"nobody"})
+	mux := newHandler(t, &fakeFeed{firstAvailable: 100, last: 200}, &fakePlatform{users: map[string]string{}}, Access{Allowed: []string{"nobody"}})
 	for _, tc := range []struct {
 		target, authorization string
 		want                  int

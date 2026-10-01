@@ -25,10 +25,12 @@ const (
 	DefaultLimit = 100
 	MaxLimit     = 1000
 
-	// identityTTL is how long the answer of the platform about a credential
-	// is reused. A client polls often; asking the platform every time would
-	// double its load for nothing.
-	identityTTL = time.Minute
+	// callerTTL is how long the answer of the platform about a credential,
+	// who it is and which spaces it is a member of, is reused. A client polls
+	// often; asking the platform every time would double its load for
+	// nothing. It is also how long a space stays readable after the member
+	// left it.
+	callerTTL = time.Minute
 )
 
 // Routes of the API, as the proxy of the platform forwards them.
@@ -39,59 +41,89 @@ const (
 
 // Feed is what the handler reads. The store of the feed implements it.
 type Feed interface {
-	Read(ctx context.Context, since uint64, limit int) (feed.Page, error)
+	Read(ctx context.Context, since uint64, limit int, scope feed.Scope) (feed.Page, error)
 	Head(ctx context.Context) (feed.Head, error)
 }
 
-// Identifier asks the platform who the caller is. The platform client
-// implements it.
-type Identifier interface {
+// Platform asks the platform who the caller is and which spaces it is a
+// member of. The platform client implements it.
+type Platform interface {
 	Whoami(ctx context.Context, header http.Header) (*httpx.Identity, error)
+	Drives(ctx context.Context, header http.Header) ([]httpx.Drive, error)
+}
+
+// Access says who may read the feed and how much of it.
+type Access struct {
+	// Allowed are the user names that may read; empty lets everyone in.
+	Allowed []string
+	// FullFeed are the user names that read every space, allowed or not.
+	// Everyone else reads the spaces they are a member of.
+	FullFeed []string
 }
 
 // Handler answers the requests of the feed.
 type Handler struct {
 	store    Feed
-	platform Identifier
+	platform Platform
 	allowed  map[string]struct{}
+	fullFeed map[string]struct{}
 	metrics  *metrics.Metrics
 	log      *slog.Logger
 
-	mu         sync.Mutex
-	identities map[string]cachedIdentity
+	mu      sync.Mutex
+	callers map[string]caller
+	swept   time.Time
 }
 
-type cachedIdentity struct {
-	username string
-	expires  time.Time
+// caller is what the platform said about a credential. The user name is
+// asked for only when a list of users needs it, the spaces only for a read;
+// listed says the spaces are known or not needed.
+type caller struct {
+	allowed bool
+	full    bool
+	listed  bool
+	spaces  []feed.Space
+	expires time.Time
 }
 
-// New returns a handler. An empty allowed list lets every authenticated user
-// read the feed.
-func New(store Feed, platform Identifier, allowed []string, m *metrics.Metrics, log *slog.Logger) *Handler {
-	h := &Handler{
-		store:      store,
-		platform:   platform,
-		metrics:    m,
-		log:        log,
-		identities: map[string]cachedIdentity{},
+// New returns a handler.
+func New(store Feed, platform Platform, access Access, m *metrics.Metrics, log *slog.Logger) *Handler {
+	return &Handler{
+		store:    store,
+		platform: platform,
+		allowed:  set(access.Allowed),
+		fullFeed: set(access.FullFeed),
+		metrics:  m,
+		log:      log,
+		callers:  map[string]caller{},
 	}
-	if len(allowed) > 0 {
-		h.allowed = make(map[string]struct{}, len(allowed))
-		for _, user := range allowed {
-			h.allowed[user] = struct{}{}
-		}
+}
+
+// set returns nil for an empty list, which is how an absent list is told
+// from one nobody is on.
+func set(users []string) map[string]struct{} {
+	if len(users) == 0 {
+		return nil
 	}
-	return h
+	out := make(map[string]struct{}, len(users))
+	for _, user := range users {
+		out[user] = struct{}{}
+	}
+	return out
 }
 
 // Register mounts the routes on the mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("GET "+RouteFeed, h.counted(h.authorized(h.feed)))
-	mux.Handle("GET "+RouteHead, h.counted(h.authorized(h.head)))
+	mux.Handle("GET "+RouteFeed, h.counted(h.feed))
+	mux.Handle("GET "+RouteHead, h.counted(h.head))
 }
 
 func (h *Handler) feed(w http.ResponseWriter, r *http.Request) {
+	who, ok := h.authorize(w, r, true)
+	if !ok {
+		return
+	}
+
 	since, err := parseUint(r.URL.Query().Get("since"), 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "since must be a non-negative integer")
@@ -103,7 +135,16 @@ func (h *Handler) feed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := h.store.Read(r.Context(), since, int(limit))
+	scope := feed.Everything()
+	if !who.full {
+		ids := make([]string, 0, len(who.spaces))
+		for _, space := range who.spaces {
+			ids = append(ids, space.ID)
+		}
+		scope = feed.InSpaces(ids...)
+	}
+
+	page, err := h.store.Read(r.Context(), since, int(limit), scope)
 	switch {
 	case stderrors.Is(err, errors.ErrCursorTooOld):
 		writeJSON(w, http.StatusGone, struct {
@@ -117,10 +158,17 @@ func (h *Handler) feed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !who.full {
+		page.Spaces = who.spaces
+	}
 	writeJSON(w, http.StatusOK, page)
 }
 
 func (h *Handler) head(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, false); !ok {
+		return
+	}
+
 	head, err := h.store.Head(r.Context())
 	if err != nil {
 		h.log.Error("read head failed", slog.Any("error", err))
@@ -130,55 +178,99 @@ func (h *Handler) head(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, head)
 }
 
-// authorized enforces the list of allowed users. The proxy of the platform
-// has already authenticated the caller; this asks the platform who it is.
-func (h *Handler) authorized(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h.allowed == nil {
-			next(w, r)
-			return
+// authorize answers the request itself when the caller may not read, and
+// returns what is known about the caller otherwise. The proxy of the
+// platform has already authenticated the caller; this asks the platform who
+// it is and, for a read, which spaces it is a member of.
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, read bool) (caller, bool) {
+	who, err := h.lookup(r.Context(), r.Header, read)
+	if err != nil {
+		if code, ok := httpx.Status(err); ok {
+			writeError(w, code, http.StatusText(code))
+			return caller{}, false
 		}
-
-		username, err := h.identify(r.Context(), r.Header)
-		if err != nil {
-			if code, ok := httpx.Status(err); ok {
-				writeError(w, code, http.StatusText(code))
-				return
-			}
-			h.log.Error("identify caller failed", slog.Any("error", err))
-			writeError(w, http.StatusBadGateway, "the platform did not answer")
-			return
-		}
-
-		if _, ok := h.allowed[username]; !ok {
-			writeError(w, http.StatusForbidden, errors.ErrNotAllowed.Error())
-			return
-		}
-		next(w, r)
+		h.log.Error("identify caller failed", slog.Any("error", err))
+		writeError(w, http.StatusBadGateway, "the platform did not answer")
+		return caller{}, false
 	}
+
+	if !who.allowed {
+		writeError(w, http.StatusForbidden, errors.ErrNotAllowed.Error())
+		return caller{}, false
+	}
+	return who, true
 }
 
-// identify returns the user name behind the credentials of the request,
-// from the cache when the same credential was seen recently.
-func (h *Handler) identify(ctx context.Context, header http.Header) (string, error) {
+// lookup returns what the platform says about the credentials of the
+// request, from the cache when the same credential was seen recently.
+func (h *Handler) lookup(ctx context.Context, header http.Header, read bool) (caller, error) {
+	named := h.allowed != nil || h.fullFeed != nil
+	if !named && !read {
+		return caller{allowed: true}, nil
+	}
+
 	key := credentialKey(header)
-
 	h.mu.Lock()
-	cached, ok := h.identities[key]
+	cached, ok := h.callers[key]
 	h.mu.Unlock()
-	if ok && time.Now().Before(cached.expires) {
-		return cached.username, nil
+	if ok && time.Now().Before(cached.expires) && (cached.listed || !read) {
+		return cached, nil
 	}
 
-	identity, err := h.platform.Whoami(ctx, header)
-	if err != nil {
-		return "", err
+	who := caller{allowed: h.allowed == nil}
+	if named {
+		identity, err := h.platform.Whoami(ctx, header)
+		if err != nil {
+			return caller{}, err
+		}
+		_, who.full = h.fullFeed[identity.Username]
+		_, listed := h.allowed[identity.Username]
+		who.allowed = who.allowed || listed || who.full
 	}
+	if read && who.allowed && !who.full {
+		drives, err := h.platform.Drives(ctx, header)
+		if err != nil {
+			return caller{}, err
+		}
+		who.spaces = spacesOf(drives)
+	}
+	who.listed = read || who.full || !who.allowed
+	who.expires = time.Now().Add(callerTTL)
 
+	h.remember(key, who)
+	return who, nil
+}
+
+// remember caches what was learnt about a credential. The entries that ran
+// out go once per TTL, so that the cache holds the credentials of the last
+// minutes only.
+func (h *Handler) remember(key string, who caller) {
 	h.mu.Lock()
-	h.identities[key] = cachedIdentity{username: identity.Username, expires: time.Now().Add(identityTTL)}
-	h.mu.Unlock()
-	return identity.Username, nil
+	defer h.mu.Unlock()
+
+	now := time.Now()
+	if now.Sub(h.swept) > callerTTL {
+		for stale, cached := range h.callers {
+			if now.After(cached.expires) {
+				delete(h.callers, stale)
+			}
+		}
+		h.swept = now
+	}
+	h.callers[key] = who
+}
+
+// spacesOf keeps the drives that are spaces of their own. A share the caller
+// received is a part of a space of somebody else and is not followed.
+func spacesOf(drives []httpx.Drive) []feed.Space {
+	spaces := []feed.Space{}
+	for _, drive := range drives {
+		if drive.SpaceID == "" || (drive.Type != httpx.DrivePersonal && drive.Type != httpx.DriveProject) {
+			continue
+		}
+		spaces = append(spaces, feed.Space{ID: drive.SpaceID, Name: drive.Name, Type: drive.Type})
+	}
+	return spaces
 }
 
 // credentialKey hashes the credentials of a request, so that the cache never

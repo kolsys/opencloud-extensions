@@ -22,13 +22,14 @@ type Config struct {
 	HTTPAddr string `json:"http_addr" env:"FILE_ACTIVITY_HTTP_ADDR" desc:"Address the HTTP server listens on."`
 	LogLevel string `json:"log_level" env:"OC_LOG_LEVEL;FILE_ACTIVITY_LOG_LEVEL" desc:"Log level: panic, fatal, error, warn, info, debug, trace."`
 
-	AllowedUsers []string `json:"allowed_users" env:"FILE_ACTIVITY_ALLOWED_USERS" desc:"User names allowed to read the feed, comma separated. Empty means everyone."`
+	AllowedUsers  []string `json:"allowed_users" env:"FILE_ACTIVITY_ALLOWED_USERS" desc:"User names allowed to read the feed, comma separated. Empty means everyone."`
+	FullFeedUsers []string `json:"full_feed_users" env:"FILE_ACTIVITY_FULL_FEED_USERS" desc:"User names that read every space of the feed, comma separated. Everyone else reads the spaces they are a member of."`
 }
 
 // Stream is the JetStream stream the feed is kept in.
 type Stream struct {
 	Name     string        `json:"name" env:"FILE_ACTIVITY_STREAM" desc:"Name of the stream of the feed."`
-	Subject  string        `json:"subject" env:"FILE_ACTIVITY_SUBJECT" desc:"Subject the feed is published to."`
+	Subject  string        `json:"subject" env:"FILE_ACTIVITY_SUBJECT" desc:"Prefix of the subjects the feed is published to; the space of an event is the last token."`
 	MaxAge   time.Duration `json:"max_age" env:"FILE_ACTIVITY_MAX_AGE" desc:"How long an event stays readable."`
 	MaxBytes config.Bytes  `json:"max_bytes" env:"FILE_ACTIVITY_MAX_BYTES" desc:"Size limit of the stream, like 10Gi."`
 }

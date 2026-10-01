@@ -19,6 +19,14 @@ info:
     the client has to resync its own state from scratch: continuing from the
     oldest available entry would silently skip the changes in between.
 
+    A user reads the entries of the spaces it is a member of, its personal
+    space and the project spaces, and the answer lists them in `spaces`.
+    Shares the user received are not followed. The spaces are those of the
+    moment of the request: a space the user joins shows from then on, without
+    the entries that came before, and a space the user leaves drops out of
+    `spaces`, which is the only signal a client gets of it. The service can
+    be started with a list of user names that read every space instead.
+
     Requests reach the service through the proxy of the platform, which
     authenticates them. Any user of the platform may read the feed unless the
     service was started with a list of allowed user names.
@@ -42,8 +50,10 @@ paths:
       summary: Read the entries after a cursor.
       description: |
         Returns the entries with a sequence number greater than `since`, oldest
-        first. An empty `events` with `next` equal to `since` means the client
-        has caught up; the same `since` always returns the same entries.
+        first, of the spaces the caller reads. An empty `events` means the
+        client has caught up; `next` is stored all the same, since it moves on
+        past the entries of other spaces. The same `since` returns the same
+        entries as long as the spaces of the caller stay the same.
       parameters:
         - name: since
           in: query
@@ -157,7 +167,10 @@ components:
         next:
           type: integer
           format: int64
-          description: Cursor for the next request. Equal to the `since` of the request when nothing was returned.
+          description: |
+            Cursor for the next request. Once nothing more of the spaces of
+            the caller follows, it is `last`, so that a client of quiet spaces
+            keeps a cursor inside the retention.
           example: 44
         first_available:
           type: integer
@@ -169,6 +182,30 @@ components:
           format: int64
           description: Newest sequence number of the feed. Zero while the feed is empty.
           example: 50
+        spaces:
+          type: array
+          description: |
+            The spaces the page covers, the ones the caller is a member of.
+            Absent for a caller that reads every space.
+          items:
+            $ref: "#/components/schemas/Space"
+
+    Space:
+      type: object
+      additionalProperties: false
+      required: [id, name, type]
+      properties:
+        id:
+          type: string
+          description: Identifier of the space, the `space_id` of its entries.
+          example: b1f74ec4-dd7e-11ef-a543-03775734d0f7
+        name:
+          type: string
+          example: Fixtures
+        type:
+          type: string
+          enum: [personal, project]
+          example: project
 
     Head:
       type: object

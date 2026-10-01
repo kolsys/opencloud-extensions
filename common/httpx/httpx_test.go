@@ -162,6 +162,79 @@ func TestPropFindEscapesThePath(t *testing.T) {
 	}
 }
 
+// The listing comes with the credentials of the client, and the id of a
+// space is cut down to the part the events carry.
+func TestDrives(t *testing.T) {
+	var seen *http.Request
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r
+		if r.Header.Get("Authorization") != "Basic alan" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[
+			{"id":"storage$personal-space","name":"Alan Turing","driveType":"personal","quota":{"total":1}},
+			{"id":"storage$project-space","name":"Fixtures","driveType":"project"},
+			{"id":"shares$share!mount","name":"clip.mp4","driveType":"mountpoint"}
+		]}`))
+	}))
+	defer platform.Close()
+
+	client, err := NewClient(platform.URL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := http.Header{}
+	header.Set("Authorization", "Basic alan")
+	header.Set("X-Other", "not forwarded")
+	drives, err := client.Drives(context.Background(), header)
+	if err != nil {
+		t.Fatalf("Drives: %v", err)
+	}
+	if seen.URL.Path != drivesPath || seen.Header.Get("X-Other") != "" {
+		t.Errorf("the platform saw %s with %v", seen.URL.Path, seen.Header)
+	}
+	want := []Drive{
+		{ID: "storage$personal-space", SpaceID: "personal-space", Name: "Alan Turing", Type: DrivePersonal},
+		{ID: "storage$project-space", SpaceID: "project-space", Name: "Fixtures", Type: DriveProject},
+		{ID: "shares$share!mount", SpaceID: "share", Name: "clip.mp4", Type: "mountpoint"},
+	}
+	if len(drives) != len(want) {
+		t.Fatalf("drives = %+v", drives)
+	}
+	for i := range want {
+		if drives[i] != want[i] {
+			t.Errorf("drive %d = %+v, want %+v", i, drives[i], want[i])
+		}
+	}
+
+	if _, err := client.Drives(context.Background(), http.Header{}); err != nil {
+		if code, ok := Status(err); !ok || code != http.StatusUnauthorized {
+			t.Errorf("Drives without a credential: %v", err)
+		}
+	} else {
+		t.Error("Drives without a credential succeeded")
+	}
+}
+
+// A caller without spaces gets null from the platform, not an error.
+func TestDrivesOfNobody(t *testing.T) {
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`null`))
+	}))
+	defer platform.Close()
+
+	client, err := NewClient(platform.URL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drives, err := client.Drives(context.Background(), http.Header{})
+	if err != nil || len(drives) != 0 {
+		t.Errorf("Drives = %v, %v", drives, err)
+	}
+}
+
 // Everything the client sent has to reach the platform unchanged.
 func TestProxyPassesTheRequestThrough(t *testing.T) {
 	var got *http.Request

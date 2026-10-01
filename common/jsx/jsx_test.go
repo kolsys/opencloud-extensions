@@ -118,6 +118,70 @@ func TestStreamRoundTrip(t *testing.T) {
 	}
 }
 
+// A read on some subjects keeps the order and the sequence numbers of the
+// stream, and its pending count is what tells a drained read from a full page.
+func TestReadFromSubjects(t *testing.T) {
+	conn := connect(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+
+	const stream = "jsx-test-subjects"
+	t.Cleanup(func() { _ = conn.JetStream().DeleteStream(context.Background(), stream) })
+
+	if _, err := conn.EnsureStream(ctx, jetstream.StreamConfig{
+		Name:      stream,
+		Subjects:  []string{stream + ".>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+	}); err != nil {
+		t.Fatalf("EnsureStream: %v", err)
+	}
+
+	seqs := map[string][]uint64{}
+	for _, subject := range []string{"a", "b", "a", "c", "b", "a"} {
+		ack, err := conn.Publish(ctx, stream+"."+subject, "", []byte(subject))
+		if err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		seqs[subject] = append(seqs[subject], ack.Seq)
+	}
+	first := seqs["a"][0]
+
+	messages, err := conn.ReadFrom(ctx, stream, first, 10, stream+".a", stream+".c")
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	want := []uint64{seqs["a"][0], seqs["a"][1], seqs["c"][0], seqs["a"][2]}
+	if len(messages) != len(want) {
+		t.Fatalf("ReadFrom returned %d messages, want %d", len(messages), len(want))
+	}
+	for i, message := range messages {
+		if message.Seq != want[i] || string(message.Data) == "b" {
+			t.Errorf("message %d = %+v, want seq %d", i, message, want[i])
+		}
+	}
+	if last := messages[len(messages)-1]; last.Pending != 0 {
+		t.Errorf("the last message of a drained read has %d pending", last.Pending)
+	}
+
+	page, err := conn.ReadFrom(ctx, stream, first, 2, stream+".a", stream+".c")
+	if err != nil {
+		t.Fatalf("ReadFrom a page: %v", err)
+	}
+	if len(page) != 2 || page[1].Pending != 2 {
+		t.Errorf("a page of two out of four = %+v, want two more pending", page)
+	}
+
+	// Messages after the cursor on other subjects only: empty, no error.
+	tail, err := conn.ReadFrom(ctx, stream, seqs["c"][0]+1, 10, stream+".c")
+	if err != nil {
+		t.Fatalf("ReadFrom past the end: %v", err)
+	}
+	if len(tail) != 0 {
+		t.Errorf("ReadFrom past the end returned %d messages", len(tail))
+	}
+}
+
 // The extensions consume the stream of the platform without changing it.
 func TestConsumerOnMainQueue(t *testing.T) {
 	conn := connect(t)
