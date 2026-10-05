@@ -18,8 +18,10 @@ import (
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // Headers and values the platform expects.
@@ -171,4 +173,15 @@ func statusError(operation string, status *rpc.Status) error {
 // unauthenticated reports whether a status asks for a fresh token.
 func unauthenticated(status *rpc.Status) bool {
 	return status.GetCode() == rpc.Code_CODE_UNAUTHENTICATED
+}
+
+// Transient reports whether an error of the gateway is one a retry may get
+// past: the gateway away or slow, not a wrong answer.
+func Transient(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted:
+		return true
+	default:
+		return false
+	}
 }

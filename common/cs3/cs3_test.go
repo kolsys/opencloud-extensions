@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // probeName is the file the upload check of the stand leaves in a personal
@@ -182,6 +185,20 @@ func TestDownloadRange(t *testing.T) {
 func TestNewNeedsAServiceAccount(t *testing.T) {
 	if _, err := New(Config{GatewayAddr: "opencloud:9142"}, slog.Default()); !errors.Is(err, ErrNoServiceAccount) {
 		t.Errorf("New without a service account: %v, want ErrNoServiceAccount", err)
+	}
+}
+
+func TestTransient(t *testing.T) {
+	refused := status.Error(codes.Unavailable, "connection error: connection refused")
+	for _, err := range []error{refused, wrap("stat", Ref{}, refused), status.Error(codes.DeadlineExceeded, "slow")} {
+		if !Transient(err) {
+			t.Errorf("%v: not transient", err)
+		}
+	}
+	for _, err := range []error{nil, ErrNotFound, errors.New("plain"), status.Error(codes.NotFound, "gone"), status.Error(codes.PermissionDenied, "no")} {
+		if Transient(err) {
+			t.Errorf("%v: transient", err)
+		}
 	}
 }
 

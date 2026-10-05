@@ -112,6 +112,27 @@ func TestWalkOfAFolder(t *testing.T) {
 	}
 }
 
+func TestPathsOfAFolder(t *testing.T) {
+	m, _ := tree(t)
+	var got []string
+	if err := m.Paths(context.Background(), "sp", "/movies", func(p string) error {
+		got = append(got, p)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+	if !equal(got, []string{"/movies/a.mp4", "/movies/sub/b.mp4"}) {
+		t.Errorf("paths of /movies = %v", got)
+	}
+
+	got = nil
+	_ = m.Paths(context.Background(), "sp", "/", func(p string) error { got = append(got, p); return nil })
+	if len(got) != 4 {
+		t.Errorf("paths of the root found %d files", len(got))
+	}
+}
+
 func TestMoveFileAndFolder(t *testing.T) {
 	m, _ := tree(t)
 	ctx := context.Background()

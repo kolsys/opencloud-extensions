@@ -5,7 +5,10 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"log/slog"
+	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -36,20 +39,34 @@ func md5Of(data string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-const sp = "space-1"
+const (
+	sp = "space-1"
+	// blobRoot is the blob of root.mp4, which the platform never changes.
+	blobRoot = "blob-root"
+)
 
 var root = cs3.Ref{StorageID: "st", SpaceID: sp, OpaqueID: sp}
 
-// fakePlatform answers listings from tables.
+// fakePlatform answers listings from tables. The failing container answers
+// failWith instead, failures times, or for good when failures is negative.
 type fakePlatform struct {
 	spaces     []cs3.Space
 	containers map[string][]cs3.ResourceInfo
 	recycle    []cs3.RecycleItem
+	failing    string
+	failures   int
+	failWith   error
 }
 
 func (f *fakePlatform) ListSpaces(context.Context) ([]cs3.Space, error) { return f.spaces, nil }
 
 func (f *fakePlatform) ListContainer(_ context.Context, ref cs3.Ref) ([]cs3.ResourceInfo, error) {
+	if ref.OpaqueID == f.failing && f.failures != 0 {
+		if f.failures > 0 {
+			f.failures--
+		}
+		return nil, f.failWith
+	}
 	infos, ok := f.containers[ref.OpaqueID]
 	if !ok {
 		return nil, cs3.ErrNotFound
@@ -92,12 +109,17 @@ func platform() *fakePlatform {
 	}
 }
 
+// rootEntry is root.mp4 the way the platform has it, with its blob.
+func rootEntry(p string) tree.Entry {
+	return tree.Entry{SpaceID: sp, FileID: "f-root", Path: p, BlobID: blobRoot, Size: 5, Mime: "video/mp4", ETag: "e-root", MTime: time.Unix(1700000000, 0).UTC(), SHA1: sha1Of(rootData), MD5: md5Of(rootData)}
+}
+
 func seeded(t *testing.T) *tree.Tree {
 	t.Helper()
 	tr := tree.New(treetest.New(""))
 	for _, e := range []tree.Entry{
 		// Unchanged: kept with its blob.
-		{SpaceID: sp, FileID: "f-root", Path: "/root.mp4", BlobID: "blob-root", Size: 5, Mime: "video/mp4", ETag: "e-root", MTime: time.Unix(1700000000, 0).UTC(), SHA1: sha1Of(rootData), MD5: md5Of(rootData)},
+		rootEntry("/root.mp4"),
 		// A newer version went by: the blob is not known any more.
 		{SpaceID: sp, FileID: "f-a", Path: "/movies/a.mp4", BlobID: "blob-a1", Size: 4, ETag: "e-a1"},
 		// In the trash bin of the platform now: the record follows.
@@ -112,21 +134,43 @@ func seeded(t *testing.T) *tree.Tree {
 	return tr
 }
 
+func discard() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
+
+// run resyncs and collects the files reported without a blob, sorted.
+func run(t *testing.T, p *fakePlatform, tr *tree.Tree, blobs BlobIDs, opts Options) (*Report, []string, error) {
+	t.Helper()
+	var noBlob []string
+	opts.NoBlob = func(file string) { noBlob = append(noBlob, file) }
+	report, err := Run(t.Context(), p, tr, blobs, opts, discard())
+	slices.Sort(noBlob)
+	return report, noBlob, err
+}
+
+// quickRetries shortens the backoff for the test.
+func quickRetries(t *testing.T) {
+	t.Helper()
+	saved := backoff
+	backoff = schedule{attempts: 3, initial: time.Millisecond, max: time.Millisecond}
+	t.Cleanup(func() { backoff = saved })
+}
+
 func TestRunBringsTheTreeInLine(t *testing.T) {
 	tr := seeded(t)
-	report, err := Run(t.Context(), platform(), tr, nil, Options{}, slog.New(slog.DiscardHandler))
+	report, noBlob, err := run(t, platform(), tr, nil, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Spaces != 1 || report.Files != 3 || report.Kept != 1 || report.Rewritten != 2 || report.Stale != 2 {
+	if report.Spaces != 1 || report.Files != 3 || report.Kept != 1 || report.Rewritten != 2 || report.Stale != 2 || len(report.Failed) != 0 {
 		t.Errorf("report = %+v", report)
 	}
-	if len(report.NoBlob) != 2 || report.NoBlob[0] != sp+"/movies/a.mp4" || report.NoBlob[1] != sp+"/new.mp4" {
-		t.Errorf("no blob = %v", report.NoBlob)
+	if report.NoBlob != 2 || len(noBlob) != 2 || noBlob[0] != sp+"/movies/a.mp4" || noBlob[1] != sp+"/new.mp4" {
+		t.Errorf("no blob = %d, %v", report.NoBlob, noBlob)
 	}
 
 	ctx := t.Context()
-	if e, err := tr.File(ctx, sp, "/root.mp4"); err != nil || e.BlobID != "blob-root" {
+	if e, err := tr.File(ctx, sp, "/root.mp4"); err != nil || e.BlobID != blobRoot {
 		t.Errorf("kept file = %+v, %v", e, err)
 	}
 	if e, err := tr.File(ctx, sp, "/movies/a.mp4"); err != nil || e.BlobID != "" || e.ETag != "e-a2" || e.Size != 5 {
@@ -154,30 +198,100 @@ func TestRunBringsTheTreeInLine(t *testing.T) {
 // files changed; a file the metadata has no node for stays without one.
 func TestRunReadsTheBlobsFromTheMetadata(t *testing.T) {
 	tr := seeded(t)
-	if _, err := Run(t.Context(), platform(), tr, nil, Options{}, slog.New(slog.DiscardHandler)); err != nil {
+	if _, _, err := run(t, platform(), tr, nil, Options{}); err != nil {
 		t.Fatal(err)
 	}
 
 	blobs := fakeBlobIDs{"f-a": "blob-a2", "f-root": "blob-root-again"}
-	report, err := Run(t.Context(), platform(), tr, blobs, Options{}, slog.New(slog.DiscardHandler))
+	report, noBlob, err := run(t, platform(), tr, blobs, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// a.mp4 from the metadata, new.mp4 has no node there, root.mp4 keeps
 	// the blob the tree knew: the version did not change.
-	if report.FromMetadata != 1 || report.Rewritten != 1 || report.Kept != 2 || len(report.NoBlob) != 1 || report.NoBlob[0] != sp+"/new.mp4" {
-		t.Errorf("report = %+v", report)
+	if report.FromMetadata != 1 || report.Rewritten != 1 || report.Kept != 2 || report.NoBlob != 1 || len(noBlob) != 1 || noBlob[0] != sp+"/new.mp4" {
+		t.Errorf("report = %+v, no blob %v", report, noBlob)
 	}
 
 	ctx := t.Context()
 	if e, err := tr.File(ctx, sp, "/movies/a.mp4"); err != nil || e.BlobID != "blob-a2" {
 		t.Errorf("a.mp4 = %+v, %v", e, err)
 	}
-	if e, err := tr.File(ctx, sp, "/root.mp4"); err != nil || e.BlobID != "blob-root" {
+	if e, err := tr.File(ctx, sp, "/root.mp4"); err != nil || e.BlobID != blobRoot {
 		t.Errorf("root.mp4 = %+v, %v", e, err)
 	}
 	if e, err := tr.File(ctx, sp, "/new.mp4"); err != nil || e.BlobID != "" {
 		t.Errorf("new.mp4 = %+v, %v", e, err)
+	}
+}
+
+// A second run finds the tree in line: every file is kept, and besides the
+// record of the space nothing is written.
+func TestRerunKeepsEverything(t *testing.T) {
+	objects := treetest.New("")
+	tr := tree.New(objects)
+	if _, _, err := run(t, platform(), tr, nil, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	puts, deletes := objects.Puts, objects.Deletes
+
+	report, _, err := run(t, platform(), tr, nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Files != 3 || report.Kept != 3 || report.Rewritten != 0 || report.Stale != 0 {
+		t.Errorf("report = %+v", report)
+	}
+	if objects.Puts != puts+1 || objects.Deletes != deletes {
+		t.Errorf("a rerun wrote to the tree: puts %d, deletes %d", objects.Puts-puts, objects.Deletes-deletes)
+	}
+}
+
+// A file moved while the service was away keeps its blob at the new path,
+// since its version did not change, and loses its record at the old one.
+func TestRunCarriesTheBlobOfAMovedFile(t *testing.T) {
+	tr := seeded(t)
+	p := platform()
+	p.containers[sp] = []cs3.ResourceInfo{folder("d1", "movies"), file("f-new", "new.mp4", "e-new", newData)}
+	p.containers["d1"] = []cs3.ResourceInfo{file("f-a", "a.mp4", "e-a2", aData), folder("d2", "empty"), file("f-root", "root.mp4", "e-root", rootData)}
+
+	report, _, err := run(t, p, tr, nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Files != 3 || report.Kept != 0 || report.Rewritten != 3 || report.Stale != 2 {
+		t.Errorf("report = %+v", report)
+	}
+	ctx := t.Context()
+	if e, err := tr.File(ctx, sp, "/movies/root.mp4"); err != nil || e.BlobID != blobRoot {
+		t.Errorf("moved file = %+v, %v", e, err)
+	}
+	if _, err := tr.File(ctx, sp, "/root.mp4"); err == nil {
+		t.Error("the old path of the moved file survived")
+	}
+}
+
+// An interrupted move leaves a file at two paths; the one the platform does
+// not hold is taken out without counting as stale.
+func TestRunCleansTheLeftoverOfAnInterruptedMove(t *testing.T) {
+	tr := seeded(t)
+	if err := tr.PutFile(t.Context(), rootEntry("/old/root.mp4")); err != nil {
+		t.Fatal(err)
+	}
+
+	report, _, err := run(t, platform(), tr, nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Files != 3 || report.Kept != 1 || report.Rewritten != 2 || report.Stale != 2 {
+		t.Errorf("report = %+v", report)
+	}
+	ctx := t.Context()
+	if _, err := tr.File(ctx, sp, "/old/root.mp4"); err == nil {
+		t.Error("the leftover survived")
+	}
+	if e, err := tr.File(ctx, sp, "/root.mp4"); err != nil || e.BlobID != blobRoot {
+		t.Errorf("kept file = %+v, %v", e, err)
 	}
 }
 
@@ -187,7 +301,7 @@ func TestDryRunChangesNothing(t *testing.T) {
 	_ = tr.PutFile(t.Context(), tree.Entry{SpaceID: sp, FileID: "f-never", Path: "/never.mp4", BlobID: "b"})
 	puts, deletes := objects.Puts, objects.Deletes
 
-	report, err := Run(t.Context(), platform(), tr, nil, Options{DryRun: true}, slog.New(slog.DiscardHandler))
+	report, _, err := run(t, platform(), tr, nil, Options{DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,12 +314,54 @@ func TestDryRunChangesNothing(t *testing.T) {
 }
 
 func TestSpaceFilter(t *testing.T) {
-	report, err := Run(t.Context(), platform(), tree.New(treetest.New("")), nil, Options{Spaces: []string{"other"}}, slog.New(slog.DiscardHandler))
+	report, _, err := run(t, platform(), tree.New(treetest.New("")), nil, Options{Spaces: []string{"other"}})
 	if err != nil || report.Spaces != 0 {
 		t.Errorf("report = %+v, %v", report, err)
 	}
-	report, err = Run(t.Context(), platform(), tree.New(treetest.New("")), nil, Options{Spaces: []string{sp}}, slog.New(slog.DiscardHandler))
+	report, _, err = run(t, platform(), tree.New(treetest.New("")), nil, Options{Spaces: []string{sp}})
 	if err != nil || report.Spaces != 1 || report.Files != 3 {
 		t.Errorf("report = %+v, %v", report, err)
+	}
+}
+
+// A space that fails is reported and the run goes on with the next one.
+func TestRunGoesOnAfterAFailedSpace(t *testing.T) {
+	p := platform()
+	broken := cs3.Space{ID: "st$space-2", Root: cs3.Ref{StorageID: "st", SpaceID: "space-2", OpaqueID: "space-2"}, Name: "Broken", Type: "project"}
+	p.spaces = append([]cs3.Space{broken}, p.spaces...)
+	p.failing, p.failures, p.failWith = "space-2", -1, errors.New("boom")
+
+	report, _, err := run(t, p, tree.New(treetest.New("")), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Spaces != 2 || report.Files != 3 || len(report.Failed) != 1 || report.Failed[0] != "space-2 (Broken)" {
+		t.Errorf("report = %+v", report)
+	}
+}
+
+// A listing that fails for a while is tried again; one that keeps failing
+// fails the space after the attempts.
+func TestRunRetriesATransientError(t *testing.T) {
+	quickRetries(t)
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	p := platform()
+	p.failing, p.failures, p.failWith = "d1", 2, refused
+
+	report, _, err := run(t, p, tree.New(treetest.New("")), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Files != 3 || len(report.Failed) != 0 {
+		t.Errorf("report = %+v", report)
+	}
+
+	p.failures = -1
+	report, _, err = run(t, p, tree.New(treetest.New("")), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Failed) != 1 {
+		t.Errorf("report = %+v", report)
 	}
 }

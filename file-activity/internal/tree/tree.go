@@ -187,6 +187,15 @@ func (t *Tree) Walk(ctx context.Context, spaceID, dir string, fn func(Entry) err
 	})
 }
 
+// Paths calls fn with the path of every file under a folder of a space, the
+// root included, without reading the entries: a key is a path.
+func (t *Tree) Paths(ctx context.Context, spaceID, dir string, fn func(path string) error) error {
+	base := t.objects.Key(treeDir, spaceID)
+	return t.objects.Walk(ctx, t.treePrefix(spaceID, dir), func(object s3store.Object) error {
+		return fn(strings.TrimPrefix(object.Key, base))
+	})
+}
+
 // PlanMove returns what a move of a file or a folder changes: every file
 // with its old and its new path. Nothing is written.
 func (t *Tree) PlanMove(ctx context.Context, spaceID, oldPath, newPath string, isDir bool) ([]Renamed, error) {

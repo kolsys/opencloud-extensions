@@ -80,18 +80,26 @@ The proxy has to send `/api/file-activity` to the service.
 
 ```
 serve                                                  the service
-resync [--metadata <root>] [--dry-run] [--workers]     rebuild the tree from the platform
+resync [--space <id>] [--metadata <root>] [--dry-run]   rebuild the tree from the platform
 restore --to <webdav-url> [--space] [--dir] [--prefix] [--skip-existing] [--dry-run]
 tap [--from-start]                                     print the feed as it grows
 version
 ```
 
 `resync` compares the tree with the platform through the gateway and rewrites
-what drifted. Files that were uploaded while the service was not running have
-no blob key in the feed; `--metadata` points at the metadata directory of the
-platform, mounted read only, and the key is read from there — the same `.mpk`
-attribute the platform's own consistency check uses. The content of a blob is
-never read.
+what drifted. It takes one space at a time and writes as it goes, so an
+interrupted run keeps what it wrote and a rerun reports it as kept; it holds
+about 100 bytes per file of the tree, whatever the size of the space. A gateway
+or bucket that goes away is waited for with backoff; a space that still fails
+is logged, the run goes on with the next one and exits non-zero at the end.
+Progress is logged per space and every 10k files. Files that were uploaded
+while the service was not running have no blob key in the feed; `--metadata`
+points at the metadata directory of the platform, mounted read only, and the
+key is read from there — the same `.mpk` attribute the platform's own
+consistency check uses. The content of a blob is never read. When the command
+runs as a one-off container from the image, `docker run --no-healthcheck`
+keeps it from showing unhealthy: the healthcheck of the image probes the HTTP
+server, which only `serve` starts.
 
 `restore` writes files back over WebDAV, keeping mtime and checksum. The
 target is a template, so spaces can be mapped onto folders of one endpoint.
