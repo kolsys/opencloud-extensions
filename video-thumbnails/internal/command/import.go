@@ -18,7 +18,8 @@ const (
 )
 
 // runImport stores thumbnails made elsewhere as the masters of the videos a
-// manifest names, by path inside one space.
+// manifest names, by path inside one space. The rows that do not go through
+// are printed as the run comes to them, the counts at the end.
 func runImport(ctx context.Context, version string, args []string) error {
 	flags := newFlags("import")
 	space := flags.String("space", "", "Id or exact name of the space the paths of the manifest are in. Required.")
@@ -36,8 +37,8 @@ func runImport(ctx context.Context, version string, args []string) error {
 	if err != nil {
 		return err
 	}
-	rows, err := importer.ReadManifest(file)
-	file.Close()
+	defer file.Close()
+	rows, err := importer.OpenManifest(file)
 	if err != nil {
 		return err
 	}
@@ -48,12 +49,16 @@ func runImport(ctx context.Context, version string, args []string) error {
 	}
 	defer t.Close()
 
-	report, err := importer.Run(ctx, t.gateway, t.thumbs, &http.Client{Timeout: fetchTimeout}, t.video, rows, importer.Options{
+	opts := importer.Options{
 		Space:      *space,
 		MasterSize: t.cfg.MasterSize,
 		Workers:    *workers,
 		DryRun:     *dryRun,
-	}, t.log)
+		NotImported: func(path, reason string) {
+			fmt.Fprintf(os.Stdout, "%s: %s\n", path, reason)
+		},
+	}
+	report, err := importer.Run(ctx, t.gateway, t.thumbs, &http.Client{Timeout: fetchTimeout}, t.video, rows.Rows(), opts, t.log)
 	if report != nil {
 		printImport(report, *dryRun)
 	}
@@ -73,7 +78,4 @@ func printImport(report *importer.Report, dryRun bool) {
 	}
 	fmt.Fprintf(os.Stdout, "rows %d, %s %d, skipped %d, not found %d, not a video %d, failed %d\n", //nolint:gosec // G705: the stdout of a CLI, not a page
 		report.Rows, verb, report.Imported, report.Skipped, report.NotFound, report.NotVideo, report.Failed)
-	for _, line := range report.Errors {
-		fmt.Fprintln(os.Stdout, line) //nolint:gosec // G705: the stdout of a CLI, not a page
-	}
 }

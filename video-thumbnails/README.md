@@ -66,7 +66,9 @@ does not give the ids of trashed children.
 `import` stores thumbnails made elsewhere as masters. The manifest is a CSV
 with a header naming `path` and `thumb`: the path of the video inside the
 space and an HTTP URL of its image. It is RFC 4180, so a path with a comma
-goes in quotes. Images are fitted into the master size, never upscaled.
+goes in quotes. It is read row by row, so its length does not matter; a
+malformed row stops the run, and what went through before it stays. Images
+are fitted into the master size, never upscaled.
 
 ## Configuration
 

@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"image/jpeg"
 	"io"
+	"iter"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 
@@ -47,11 +47,19 @@ type Row struct {
 	Thumb string
 }
 
-// ReadManifest parses a CSV with a header naming the columns path and thumb;
-// other columns are ignored.
-func ReadManifest(r io.Reader) ([]Row, error) {
+// Manifest is a CSV with a header naming the columns path and thumb; other
+// columns are ignored. The rows are read one at a time, so a manifest of
+// any length costs the memory of one row.
+type Manifest struct {
+	reader          *csv.Reader
+	pathAt, thumbAt int
+}
+
+// OpenManifest reads the header of a manifest.
+func OpenManifest(r io.Reader) (*Manifest, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
+	reader.ReuseRecord = true
 	header, err := reader.Read()
 	if err != nil {
 		return nil, fmt.Errorf("importer: manifest: read the header: %w", err)
@@ -68,24 +76,35 @@ func ReadManifest(r io.Reader) ([]Row, error) {
 	if pathAt < 0 || thumbAt < 0 {
 		return nil, fmt.Errorf("importer: manifest: the header must name the columns %s and %s", columnPath, columnThumb)
 	}
+	return &Manifest{reader: reader, pathAt: pathAt, thumbAt: thumbAt}, nil
+}
 
-	var rows []Row
-	for line := 2; ; line++ {
-		record, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			return rows, nil
+// Rows reads the rows after the header. A malformed row ends the sequence
+// with an error naming its line.
+func (m *Manifest) Rows() iter.Seq2[Row, error] {
+	return func(yield func(Row, error) bool) {
+		for line := 2; ; line++ {
+			record, err := m.reader.Read()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				yield(Row{}, fmt.Errorf("importer: manifest line %d: %w", line, err))
+				return
+			}
+			if len(record) <= m.pathAt || len(record) <= m.thumbAt {
+				yield(Row{}, fmt.Errorf("importer: manifest line %d: too few columns", line))
+				return
+			}
+			row := Row{Path: strings.TrimSpace(record[m.pathAt]), Thumb: strings.TrimSpace(record[m.thumbAt])}
+			if row.Path == "" || row.Thumb == "" {
+				yield(Row{}, fmt.Errorf("importer: manifest line %d: empty path or thumb", line))
+				return
+			}
+			if !yield(row, nil) {
+				return
+			}
 		}
-		if err != nil {
-			return nil, fmt.Errorf("importer: manifest line %d: %w", line, err)
-		}
-		if len(record) <= pathAt || len(record) <= thumbAt {
-			return nil, fmt.Errorf("importer: manifest line %d: too few columns", line)
-		}
-		row := Row{Path: strings.TrimSpace(record[pathAt]), Thumb: strings.TrimSpace(record[thumbAt])}
-		if row.Path == "" || row.Thumb == "" {
-			return nil, fmt.Errorf("importer: manifest line %d: empty path or thumb", line)
-		}
-		rows = append(rows, row)
 	}
 }
 
@@ -111,9 +130,12 @@ type Options struct {
 	Workers    int
 	// DryRun looks the files up and fetches nothing.
 	DryRun bool
+	// NotImported is told every row that did not go through and why, as
+	// the run comes to it. Nil drops them.
+	NotImported func(path, reason string)
 }
 
-// Report is what a run did, with one line per row that was not imported.
+// Report is what a run did.
 type Report struct {
 	mu       sync.Mutex
 	Rows     int
@@ -126,7 +148,6 @@ type Report struct {
 	NotVideo int
 	// Failed rows could not be fetched, decoded or stored.
 	Failed int
-	Errors []string
 }
 
 // OK reports whether every row went through or was there already.
@@ -140,8 +161,9 @@ func (r *Report) add(fn func()) {
 	fn()
 }
 
-// Run imports the thumbnails of the rows into the space.
-func Run(ctx context.Context, platform Platform, masters Masters, fetch *http.Client, matcher *video.Matcher, rows []Row, opts Options, log *slog.Logger) (*Report, error) {
+// Run imports the thumbnails of the rows into the space. An error among the
+// rows stops the run; what went through before it stays.
+func Run(ctx context.Context, platform Platform, masters Masters, fetch *http.Client, matcher *video.Matcher, rows iter.Seq2[Row, error], opts Options, log *slog.Logger) (*Report, error) {
 	if opts.Workers < 1 {
 		opts.Workers = 1
 	}
@@ -150,7 +172,7 @@ func Run(ctx context.Context, platform Platform, masters Masters, fetch *http.Cl
 		return nil, err
 	}
 
-	report := &Report{Rows: len(rows)}
+	report := &Report{}
 	jobs := make(chan Row)
 	var wg sync.WaitGroup
 	for range opts.Workers {
@@ -160,18 +182,24 @@ func Run(ctx context.Context, platform Platform, masters Masters, fetch *http.Cl
 			}
 		})
 	}
-	for _, row := range rows {
+	stop := func() {
+		close(jobs)
+		wg.Wait()
+	}
+	for row, err := range rows {
+		if err != nil {
+			stop()
+			return report, err
+		}
 		select {
 		case jobs <- row:
+			report.Rows++
 		case <-ctx.Done():
-			close(jobs)
-			wg.Wait()
+			stop()
 			return report, ctx.Err()
 		}
 	}
-	close(jobs)
-	wg.Wait()
-	sort.Strings(report.Errors)
+	stop()
 	return report, nil
 }
 
@@ -208,7 +236,9 @@ func importRow(ctx context.Context, platform Platform, masters Masters, fetch *h
 	fail := func(count *int, reason string) {
 		report.add(func() {
 			*count++
-			report.Errors = append(report.Errors, row.Path+": "+reason)
+			if opts.NotImported != nil {
+				opts.NotImported(row.Path, reason)
+			}
 		})
 	}
 

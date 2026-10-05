@@ -3,9 +3,11 @@ package importer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
+	"iter"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -82,8 +84,35 @@ func pngOf(w, h int) []byte {
 	return buf.Bytes()
 }
 
-func TestReadManifest(t *testing.T) {
-	rows, err := ReadManifest(strings.NewReader("id,Path , thumb\n1,/movies/a.mp4,https://x/a.jpg\n2, b.mp4 ,https://x/b.jpg\n"))
+// rowsOf hands rows out the way a manifest does.
+func rowsOf(rows ...Row) iter.Seq2[Row, error] {
+	return func(yield func(Row, error) bool) {
+		for _, row := range rows {
+			if !yield(row, nil) {
+				return
+			}
+		}
+	}
+}
+
+// collect drains a sequence of rows up to its error.
+func collect(rows iter.Seq2[Row, error]) ([]Row, error) {
+	var out []Row
+	for row, err := range rows {
+		if err != nil {
+			return out, err
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func TestManifestRows(t *testing.T) {
+	m, err := OpenManifest(strings.NewReader("id,Path , thumb\n1,/movies/a.mp4,https://x/a.jpg\n2, b.mp4 ,https://x/b.jpg\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := collect(m.Rows())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,13 +120,23 @@ func TestReadManifest(t *testing.T) {
 		t.Errorf("rows = %+v", rows)
 	}
 
+	// A header without the columns is refused before any row.
+	if _, err := OpenManifest(strings.NewReader("path,url\n/a.mp4,https://x\n")); err == nil {
+		t.Error("a header without thumb was accepted")
+	}
+
+	// A malformed row ends the rows with an error, after the ones before it.
 	for name, manifest := range map[string]string{
-		"no thumb column": "path,url\n/a.mp4,https://x\n",
-		"empty path":      "path,thumb\n,https://x\n",
-		"short row":       "path,thumb\n/a.mp4\n",
+		"empty path": "path,thumb\n/ok.mp4,https://x\n,https://x\n",
+		"short row":  "path,thumb\n/ok.mp4,https://x\n/a.mp4\n",
 	} {
-		if _, err := ReadManifest(strings.NewReader(manifest)); err == nil {
-			t.Errorf("%s: accepted", name)
+		m, err := OpenManifest(strings.NewReader(manifest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := collect(m.Rows())
+		if err == nil || !strings.Contains(err.Error(), "line 3") || len(rows) != 1 || rows[0].Path != "/ok.mp4" {
+			t.Errorf("%s: rows %+v, %v", name, rows, err)
 		}
 	}
 }
@@ -136,12 +175,22 @@ func TestRunImportsThumbnailsAsMasters(t *testing.T) {
 		{Path: "/not-there.mp4", Thumb: thumbs.URL + "/big.png"},
 	}
 
-	report, err := Run(t.Context(), platform, masters, thumbs.Client(), video.NewMatcher([]string{"mp4"}), rows, Options{Space: "Creatives", MasterSize: 1280, Workers: 3}, slog.New(slog.DiscardHandler))
+	var mu sync.Mutex
+	var notImported []string
+	opts := Options{Space: "Creatives", MasterSize: 1280, Workers: 3, NotImported: func(path, reason string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notImported = append(notImported, path+": "+reason)
+	}}
+	report, err := Run(t.Context(), platform, masters, thumbs.Client(), video.NewMatcher([]string{"mp4"}), rowsOf(rows...), opts, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Rows != 7 || report.Imported != 2 || report.Skipped != 1 || report.NotFound != 1 || report.NotVideo != 1 || report.Failed != 2 || report.OK() {
 		t.Errorf("report = %+v", report)
+	}
+	if len(notImported) != 4 {
+		t.Errorf("not imported = %v", notImported)
 	}
 
 	// The tall thumbnail is fit into the master size, the small one kept.
@@ -161,16 +210,27 @@ func TestRunImportsThumbnailsAsMasters(t *testing.T) {
 
 	// The same space by id, a dry run fetches nothing.
 	fresh := &fakeMasters{masters: map[string]store.Master{}, frames: map[string][]byte{}}
-	report, err = Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher([]string{"mp4"}), rows[:2], Options{Space: sp, DryRun: true}, slog.New(slog.DiscardHandler))
+	report, err = Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher([]string{"mp4"}), rowsOf(rows[:2]...), Options{Space: sp, DryRun: true}, slog.New(slog.DiscardHandler))
 	if err != nil || report.Imported != 2 || len(fresh.frames) != 0 {
 		t.Errorf("dry run = %+v, %v, frames %d", report, err, len(fresh.frames))
 	}
 
+	// A manifest that breaks stops the run with what went through before.
+	broken := func(yield func(Row, error) bool) {
+		if yield(rows[1], nil) {
+			yield(Row{}, errors.New("line 3: torn"))
+		}
+	}
+	report, err = Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher([]string{"mp4"}), broken, Options{Space: sp, DryRun: true}, slog.New(slog.DiscardHandler))
+	if err == nil || report == nil || report.Rows != 1 || report.Imported != 1 {
+		t.Errorf("broken manifest = %+v, %v", report, err)
+	}
+
 	// A name two spaces share is refused, an unknown one too.
-	if _, err := Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher(nil), nil, Options{Space: "Twin"}, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher(nil), rowsOf(), Options{Space: "Twin"}, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("an ambiguous space name was accepted")
 	}
-	if _, err := Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher(nil), nil, Options{Space: "nowhere"}, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := Run(t.Context(), platform, fresh, thumbs.Client(), video.NewMatcher(nil), rowsOf(), Options{Space: "nowhere"}, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("an unknown space was accepted")
 	}
 }
