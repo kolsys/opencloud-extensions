@@ -8,6 +8,7 @@ import {
 import type { ApplicationSetupOptions, LoadPreviewOptions } from '@opencloud-eu/web-pkg'
 
 import { closeToFolder } from './closeToFolder'
+import { homeToSpaces } from './homeToSpaces'
 
 /**
  * The web asks for a preview only when the PROPFIND says the file has one,
@@ -56,6 +57,10 @@ export default defineWebApplication({
     // off unless the config of the app says `closeToFolder: true`
     if (applicationConfig?.closeToFolder === true) {
       closeToFolder(useRouter(), useAppsStore())
+    }
+    // off unless the config of the app says `homeToSpaces: true`
+    if (applicationConfig?.homeToSpaces === true) {
+      homeToSpaces(useRouter())
     }
 
     return {

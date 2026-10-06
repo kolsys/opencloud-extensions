@@ -9,3 +9,5 @@ web:
         config:
           # a file opened by a plain link closes into its folder
           closeToFolder: true
+          # "/" opens the spaces, not the personal space
+          homeToSpaces: true

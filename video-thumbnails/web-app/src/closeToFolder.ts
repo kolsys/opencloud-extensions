@@ -62,7 +62,8 @@ export const closeToFolder = (
   appsStore: { fileExtensions: ApplicationFileExtension[] }
 ): void => {
   router.beforeEach((to, from) => {
-    if (to.path !== '/' || from.query[contextRouteNameKey]) {
+    // "/" is a redirect, the guards see the route it leads to
+    if (to.redirectedFrom?.path !== '/' || from.query[contextRouteNameKey]) {
       return
     }
     const opensFiles = appsStore.fileExtensions.some(
@@ -78,9 +79,16 @@ export const closeToFolder = (
       return
     }
     const fileId = one(from.query.fileId)
-    return {
+    // a path from router.resolve, which the platform patches to keep the
+    // slashes of the item unescaped, as its push does
+    const target = router.resolve({
       ...folder,
       query: { ...folder.query, ...(fileId && { scrollTo: fileId }) }
+    }).fullPath
+    // the navigation to the target keeps redirectedFrom, it must pass
+    if (target === router.resolve(to).fullPath) {
+      return
     }
+    return target
   })
 }
