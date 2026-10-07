@@ -27,6 +27,11 @@ type Config struct {
 	Workers       int `json:"workers" env:"VIDEO_THUMBNAILS_WORKERS" desc:"Number of workers taking jobs from the queue."`
 	UrgentWorkers int `json:"urgent_workers" env:"VIDEO_THUMBNAILS_URGENT_WORKERS" desc:"Number of workers reserved for the previews missed by the web."`
 
+	// PlatformGenerations bounds the previews the platform generates at once
+	// for the requests passed on to it; its own limit counts cache hits too
+	// and stays off.
+	PlatformGenerations int `json:"platform_generations" env:"VIDEO_THUMBNAILS_PLATFORM_GENERATIONS" desc:"How many previews the platform generates at once for the requests passed on to it. 0 means no limit."`
+
 	// Source is how the worker reads a video: "range" serves ffmpeg over a
 	// loopback proxy that asks the platform for byte ranges, "download" pulls
 	// the whole file into a temporary file first, "auto" probes the data
@@ -73,8 +78,10 @@ func DefaultConfig() *Config {
 		LogLevel:       "info",
 		Workers:        4,
 		UrgentWorkers:  1,
-		Source:         "auto",
-		MasterSize:     1280,
+
+		PlatformGenerations: 2,
+		Source:              "auto",
+		MasterSize:          1280,
 		Resolutions: []string{
 			"16x16", "32x32", "64x64", "128x128", "500x280", "280x500",
 			"1000x560", "560x1000", "512x2048", "1080x1920", "1920x1080",
@@ -115,6 +122,9 @@ func (c *Config) Validate() error {
 	}
 	if c.UrgentWorkers < 1 {
 		return fmt.Errorf("config: VIDEO_THUMBNAILS_URGENT_WORKERS=%d: must be at least 1", c.UrgentWorkers)
+	}
+	if c.PlatformGenerations < 0 {
+		return fmt.Errorf("config: VIDEO_THUMBNAILS_PLATFORM_GENERATIONS=%d: must not be negative", c.PlatformGenerations)
 	}
 	if c.MasterSize < 1 {
 		return fmt.Errorf("config: VIDEO_THUMBNAILS_MASTER_SIZE=%d: must be at least 1", c.MasterSize)

@@ -22,7 +22,10 @@ type request struct {
 	// platform accepts; the PROPFIND asks about the same path.
 	davPath string
 	// name is the last segment of the path, the file name.
-	name      string
+	name string
+	// version is the ETag of the file as the web sends it in c, without
+	// quotes; other clients leave it empty.
+	version   string
 	box       image.Point
 	processor string
 }
@@ -52,6 +55,7 @@ func parse(r *http.Request) (*request, error) {
 	return &request{
 		davPath:   davPath,
 		name:      path.Base(davPath),
+		version:   query.Get("c"),
 		box:       image.Pt(width, height),
 		processor: query.Get("processor"),
 	}, nil

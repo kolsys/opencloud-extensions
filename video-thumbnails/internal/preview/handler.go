@@ -1,6 +1,7 @@
 // Package preview serves the previews the proxy of the platform routes to the
 // extension: the ones of videos from the masters in the bucket, the rest by
-// passing the request on to the webdav service of the platform untouched.
+// passing the request on to the webdav service of the platform, through a
+// gate that bounds what the platform generates at once.
 package preview
 
 import (
@@ -84,15 +85,17 @@ type Handler struct {
 	grid    render.Grid
 	video   *video.Matcher
 	states  *index
+	gate    *gate
 	flight  singleflight.Group
 	metrics *metrics.Metrics
 	log     *slog.Logger
 }
 
 // New returns a handler. The proxy takes everything that is not the preview
-// of a video.
-func New(proxy http.Handler, auth Authorizer, masters Masters, q Enqueuer, disk *cache.Cache, grid render.Grid, matcher *video.Matcher, m *metrics.Metrics, log *slog.Logger) *Handler {
-	return &Handler{
+// of a video; generations is how many previews the platform makes at once
+// for what is passed on to it, zero for no gate.
+func New(proxy http.Handler, auth Authorizer, masters Masters, q Enqueuer, disk *cache.Cache, grid render.Grid, matcher *video.Matcher, generations int, m *metrics.Metrics, log *slog.Logger) *Handler {
+	h := &Handler{
 		proxy:   proxy,
 		auth:    auth,
 		masters: masters,
@@ -104,6 +107,10 @@ func New(proxy http.Handler, auth Authorizer, masters Masters, q Enqueuer, disk 
 		metrics: m,
 		log:     log,
 	}
+	if generations > 0 {
+		h.gate = newGate(generations)
+	}
+	return h
 }
 
 // ServeHTTP tells the previews of videos from the rest, authorises them
@@ -120,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDAVError(w, http.StatusBadRequest, err.Error())
 		return
 	case !h.video.MatchName(req.name):
-		h.passOn(w, r)
+		h.passPreview(w, r, req)
 		return
 	}
 
@@ -134,6 +141,38 @@ func (h *Handler) passOn(w http.ResponseWriter, r *http.Request) {
 	recorder := &statusRecorder{ResponseWriter: w}
 	h.proxy.ServeHTTP(recorder, r)
 	h.metrics.HTTPRequests.WithLabelValues(RouteProxy, strconv.Itoa(recorder.status())).Inc()
+}
+
+// passPreview hands the preview of a file that is not a video to the
+// platform, through the gate when there is one. A 200 means the platform has
+// the variant from now on, by GET or by HEAD alike.
+func (h *Handler) passPreview(w http.ResponseWriter, r *http.Request, req *request) {
+	if h.gate == nil {
+		h.passOn(w, r)
+		return
+	}
+
+	outcome, release := h.gate.admit(r.Context(), req.key())
+	h.metrics.Gate.WithLabelValues(outcome).Inc()
+	switch outcome {
+	case GateSlot:
+		recorder := &statusRecorder{ResponseWriter: w}
+		// The proxy aborts with a panic when the client hangs up mid-body;
+		// the slot goes back all the same.
+		defer func() {
+			release(recorder.status() == http.StatusOK)
+			h.metrics.HTTPRequests.WithLabelValues(RouteProxy, strconv.Itoa(recorder.status())).Inc()
+		}()
+		h.proxy.ServeHTTP(recorder, r)
+	case GateBusy:
+		h.log.Debug("gate busy", slog.String("path", req.davPath))
+		h.metrics.HTTPRequests.WithLabelValues(RouteProxy, strconv.Itoa(http.StatusTooManyRequests)).Inc()
+		httpx.WriteTooManyRequests(w, retryAfterBusy)
+	case GateGone:
+		// The client hung up while waiting; there is nobody to answer.
+	default:
+		h.passOn(w, r)
+	}
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, req *request) {

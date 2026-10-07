@@ -21,6 +21,11 @@ makes the client ask for video previews comes with it and is served by it.
    small.
 4. While a thumbnail is being made the answer is `425` with `Retry-After`,
    which is what the web client waits on.
+5. A preview of anything else goes to the webdav service of the platform
+   through a gate: a variant the platform has answered before passes
+   freely, a new one takes one of a few slots, so the platform generates
+   only so many at once. Its own limit, `THUMBNAILS_MAX_CONCURRENT_REQUESTS`,
+   counts cache hits too and stays unset.
 
 Vertical video is fitted onto a blurred copy of itself instead of being
 cropped, so a face survives a 16:9 tile.
@@ -89,6 +94,7 @@ Everything is environment. The platform block is shared by both extensions.
 | `VIDEO_THUMBNAILS_HTTP_ADDR` | `0.0.0.0:9200` | Address the HTTP server listens on. |
 | `VIDEO_THUMBNAILS_WORKERS` | `4` | Workers taking jobs from the queue. |
 | `VIDEO_THUMBNAILS_URGENT_WORKERS` | `1` | Workers reserved for previews the web asked for and did not get. |
+| `VIDEO_THUMBNAILS_PLATFORM_GENERATIONS` | `2` | Previews the platform generates at once for what is passed on to it; `0` for no gate. |
 | `VIDEO_THUMBNAILS_SOURCE` | `auto` | How ffmpeg reads a video: `auto`, `range`, `download`. |
 | `VIDEO_THUMBNAILS_TEMP_DIR` | system | Where a downloaded video is put. |
 | `VIDEO_THUMBNAILS_MASTER_SIZE` | `1280` | Long side of the master frame. |

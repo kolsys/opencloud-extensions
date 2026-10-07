@@ -28,6 +28,10 @@ type Metrics struct {
 	// CacheHits counts the previews served from a cache, by level: memory
 	// (state index), disk, s3.
 	CacheHits *prometheus.CounterVec
+	// Gate counts the previews passed on to the platform, by the outcome of
+	// the gate: free (variant known), slot (took a slot), busy (turned
+	// away), gone (client left while waiting).
+	Gate *prometheus.CounterVec
 }
 
 // New registers the metrics on the registry.
@@ -64,8 +68,12 @@ func New(registry prometheus.Registerer) *Metrics {
 			Name: prefix + "cache_hits_total",
 			Help: "Previews served from a cache, by level.",
 		}, []string{"level"}),
+		Gate: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "gate_total",
+			Help: "Previews passed on to the platform, by outcome of the gate.",
+		}, []string{"outcome"}),
 	}
 
-	registry.MustRegister(m.Jobs, m.JobDuration, m.QueueDepth, m.Events, m.ConsumerLag, m.HTTPRequests, m.CacheHits)
+	registry.MustRegister(m.Jobs, m.JobDuration, m.QueueDepth, m.Events, m.ConsumerLag, m.HTTPRequests, m.CacheHits, m.Gate)
 	return m
 }

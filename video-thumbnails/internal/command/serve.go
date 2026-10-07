@@ -151,7 +151,7 @@ func runServe(ctx context.Context, version string, args []string) error {
 	obs.Mount(mux, registry, health)
 	mux.Handle(web.Route, webApp)
 	// Every preview the proxy routes here, of a video or not.
-	mux.Handle("/", preview.New(webdav, platform, thumbs, jobs, disk, grid, matcher, m, log))
+	mux.Handle("/", preview.New(webdav, platform, thumbs, jobs, disk, grid, matcher, cfg.PlatformGenerations, m, log))
 
 	source := worker.NewSource(gateway, worker.Mode(cfg.Source), cfg.TempDir, log)
 

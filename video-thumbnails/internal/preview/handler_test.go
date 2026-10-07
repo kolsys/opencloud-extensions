@@ -32,6 +32,8 @@ import (
 const (
 	clipPath = "/remote.php/dav/spaces/s1$sp1/movies/clip.mp4"
 	clipETag = "e1"
+	// proxied is what the stand-in for the webdav service answers.
+	proxied = "proxied"
 )
 
 var clip = &httpx.Resource{
@@ -136,12 +138,24 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, 2, nil)
+}
 
+// newHarnessWith builds a handler with that many slots of the gate and an
+// upstream of its own; nil answers proxied to everything.
+func newHarnessWith(t *testing.T, generations int, respond http.HandlerFunc) *harness {
+	t.Helper()
+
+	if respond == nil {
+		respond = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte(proxied))
+		}
+	}
 	var seen atomic.Pointer[http.Request]
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.Store(r.Clone(context.Background()))
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write([]byte("proxied"))
+		respond(w, r)
 	}))
 	t.Cleanup(upstream.Close)
 
@@ -166,7 +180,7 @@ func newHarness(t *testing.T) *harness {
 		metrics:  metrics.New(prometheus.NewRegistry()),
 		upstream: &seen,
 	}
-	h.handler = New(proxy, h.auth, h.masters, h.queue, disk, grid, video.NewMatcher([]string{"mp4"}), h.metrics, log)
+	h.handler = New(proxy, h.auth, h.masters, h.queue, disk, grid, video.NewMatcher([]string{"mp4"}), generations, h.metrics, log)
 	return h
 }
 
@@ -202,7 +216,7 @@ func TestPassesOnWhatIsNotAVideoPreview(t *testing.T) {
 		"/remote.php/dav/spaces/s1$sp1/movies/clip.mp4.png?preview=1",
 	} {
 		w := h.get(t, target)
-		if w.Code != http.StatusOK || w.Body.String() != "proxied" {
+		if w.Code != http.StatusOK || w.Body.String() != proxied {
 			t.Errorf("%s: %d %q, want the answer of the platform", target, w.Code, w.Body.String())
 		}
 		seen := h.upstream.Load()
@@ -456,7 +470,7 @@ func TestPassesOnADirectory(t *testing.T) {
 	h := newHarness(t)
 	h.auth.resources["/dav/spaces/s1$sp1/dir.mp4"] = &httpx.Resource{FileID: "s1$sp1!d", SpaceID: "sp1", OpaqueID: "d", IsDir: true}
 
-	if w := h.get(t, "/dav/spaces/s1$sp1/dir.mp4?preview=1"); w.Body.String() != "proxied" {
+	if w := h.get(t, "/dav/spaces/s1$sp1/dir.mp4?preview=1"); w.Body.String() != proxied {
 		t.Errorf("a directory named like a video: %d %q", w.Code, w.Body.String())
 	}
 }

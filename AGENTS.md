@@ -93,3 +93,7 @@ Comments say what is not obvious and nothing else:
 - A request that carries the signature of a public link is authorised with
   `HEAD`, not `PROPFIND`: the platform accepts a link signature on `GET` and
   `HEAD` only.
+- `THUMBNAILS_MAX_CONCURRENT_REQUESTS` of the platform counts every preview
+  request, cache hits included, and answers 429 at once instead of queueing.
+  It stays unset; `video-thumbnails` bounds the generations with a gate on
+  the previews it passes on.

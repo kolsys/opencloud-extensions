@@ -77,6 +77,16 @@ func WriteNotFound(w http.ResponseWriter, name string) {
 	WriteDAVError(w, http.StatusNotFound, NotFoundMessage(name))
 }
 
+// WriteTooManyRequests answers 429 with the pause to take, the answer of the
+// platform when its thumbnails service is full.
+func WriteTooManyRequests(w http.ResponseWriter, retryAfter int) {
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	WriteDAVError(w, http.StatusTooManyRequests, http.StatusText(http.StatusTooManyRequests))
+}
+
 // WriteTooEarly answers 425 while the thumbnail is being generated.
 //
 // The Retry-After is an addition of ours: the platform sets that header on
